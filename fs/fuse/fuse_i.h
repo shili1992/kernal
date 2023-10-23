@@ -238,7 +238,7 @@ struct fuse_release_args;
  * operations.
  */
 struct fuse_passthrough {
-	struct file *filp;
+	struct file *filp;  // 要直接passthrough 原本打开文件的 file, 打开文件的 file信息, 通过passthrough的方式
 	struct cred *cred;
 };
 
@@ -254,7 +254,7 @@ struct fuse_file {
 	u64 kh;
 
 	/** File handle used by userspace */
-	u64 fh;
+	u64 fh;  // daemon 空间返回的 fd, 保存在这里
 
 	/** Node id of this file */
 	u64 nodeid;
@@ -328,10 +328,10 @@ struct fuse_page_desc {
 
 struct fuse_args {
 	uint64_t nodeid;
-	uint32_t opcode;
+	uint32_t opcode; // 操作码
 	uint32_t error_in;
-	unsigned short in_numargs;
-	unsigned short out_numargs;
+	unsigned short in_numargs;  // 入参数量
+	unsigned short out_numargs; // 出参数量
 	bool force:1;
 	bool noreply:1;
 	bool nocreds:1;
@@ -344,6 +344,7 @@ struct fuse_args {
 	bool may_block:1;
 	struct fuse_in_arg in_args[FUSE_MAX_IN_ARGS];
 	struct fuse_arg out_args[FUSE_MAX_OUT_ARGS];
+    // async fuse request 完成之后的 回调函数
 	void (*end)(struct fuse_mount *fm, struct fuse_args *args, int error);
 
 	/* Path used for completing d_canonical_path */
@@ -360,20 +361,23 @@ struct fuse_args_pages {
 #define FUSE_ARGS(args) struct fuse_args args = {}
 
 /** The request IO state (for asynchronous processing) */
+// io请求的信息
+// 该结构体用于记录每个io request的状态，一个io request是和用户（上层）请求一一对应的
+//而非fuse_request。一个io request在逻辑上可能对应多个fuse_request。
 struct fuse_io_priv {
 	struct kref refcnt;
-	int async;
-	spinlock_t lock;
-	unsigned reqs;
+	int async;   // 表示 io拆分之后 是否可以并行发送, 记录是否启用了background机制；
+    spinlock_t lock;
+	unsigned reqs;  // 还剩多少background 没有完成
 	ssize_t bytes;
 	size_t size;
 	__u64 offset;
-	bool write;
+	bool write;   // 读还是写
 	bool should_dirty;
 	int err;
 	struct kiocb *iocb;
-	struct completion *done;
-	bool blocking;
+	struct completion *done; // 在background + 同步IO的情况下进行等待
+	bool blocking;   //记录本次req是否属于用户native aio提交IO；
 };
 
 #define FUSE_IO_PRIV_SYNC(i) \
@@ -510,7 +514,7 @@ struct fuse_iqueue {
 	u64 reqctr;
 
 	/** The list of pending requests */
-	struct list_head pending;
+	struct list_head pending;  // 同步请求（例如，元数据）放在 pending 队列中，并且pending队列会周期性接收来自background 的请求
 
 	/** Pending interrupts */
 	struct list_head interrupts;
@@ -543,8 +547,10 @@ struct fuse_pqueue {
 	spinlock_t lock;
 
 	/** Hash table of requests being processed */
-	struct list_head *processing;
-
+    // 当pending队列中的请求被转发到fuse daemon的同时，也被移动到processing队列。
+    // 所以processing队列中的请求，表示正在被处理fuse daemon处理的请求。
+    // 当fuse daemon真正处理完请求，通过/dev/fuse下发reply时，该请求将从processing队列中删除。
+    struct list_head *processing;
 	/** The list of requests under I/O */
 	struct list_head io;
 };
@@ -655,16 +661,16 @@ struct fuse_conn {
 	struct rb_root polled_files;
 
 	/** Maximum number of outstanding background requests */
-	unsigned max_background;
+	unsigned max_background;  // 最大的background数量
 
 	/** Number of background requests at which congestion starts */
 	unsigned congestion_threshold;
 
 	/** Number of requests currently in the background */
-	unsigned num_background;
+	unsigned num_background;  // 当前的 使用backgroud的数量
 
 	/** Number of background requests currently queued for userspace */
-	unsigned active_background;
+	unsigned active_background;  // 当前正在 pending 中 background中数量
 
 	/** The list of background requests set aside for later queuing */
 	struct list_head bg_queue;
@@ -701,7 +707,7 @@ struct fuse_conn {
 	unsigned conn_init:1;
 
 	/** Do readpages asynchronously?  Only set in INIT */
-	unsigned async_read:1;
+	unsigned async_read:1;  //是否支持异步读取， 默认支持
 
 	/** Return an unique read error after abort.  Only set in INIT */
 	unsigned abort_err:1;

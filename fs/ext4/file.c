@@ -56,6 +56,7 @@ static bool ext4_dio_supported(struct kiocb *iocb, struct iov_iter *iter)
 	return true;
 }
 
+// dio 读取
 static ssize_t ext4_dio_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	ssize_t ret;
@@ -117,6 +118,7 @@ static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 #endif
 
+// ext4 实现的 vfs read 函数
 static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -131,10 +133,10 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (IS_DAX(inode))
 		return ext4_dax_read_iter(iocb, to);
 #endif
-	if (iocb->ki_flags & IOCB_DIRECT)
+	if (iocb->ki_flags & IOCB_DIRECT)  // direct io流程
 		return ext4_dio_read_iter(iocb, to);
 
-	return generic_file_read_iter(iocb, to);
+	return generic_file_read_iter(iocb, to);  // buffer io流程
 }
 
 /*

@@ -1875,6 +1875,11 @@ DEFINE_PER_CPU(int, dirty_throttle_leaks) = 0;
  * by a lot, to prevent individual processes from overshooting the limit
  * by (ratelimit_pages) each.
  */
+ //
+ // 将direct的页缓存的数据刷到磁盘
+ //1：当前task的脏页数量大于ratelimit ，（如果dirty_exceeded为0，则为current->nr_dirtied_pause；如果dirty_exceeded为1，则最大为32KB）
+ //2：当前CPU的脏页数超过了门限值ratelimit_pages；
+ //3：当前脏页数+退出线程遗留的脏页超过了门限；
 void balance_dirty_pages_ratelimited(struct address_space *mapping)
 {
 	struct inode *inode = mapping->host;
@@ -1892,8 +1897,8 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 		wb = &bdi->wb;
 
 	ratelimit = current->nr_dirtied_pause;
-	if (wb->dirty_exceeded)
-		ratelimit = min(ratelimit, 32 >> (PAGE_SHIFT - 10));
+	if (wb->dirty_exceeded)  /* 如果该值设置了，则需要通过降低平衡触发的门限来加速脏页回收 */
+		ratelimit = min(ratelimit, 32 >> (PAGE_SHIFT - 10));  /* 重新修改门限，最大为32KB，初始值128KB，加快回收 */
 
 	preempt_disable();
 	/*
@@ -1902,10 +1907,11 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	 * 1000+ tasks, all of them start dirtying pages at exactly the same
 	 * time, hence all honoured too large initial task->nr_dirtied_pause.
 	 */
-	p =  this_cpu_ptr(&bdp_ratelimits);
-	if (unlikely(current->nr_dirtied >= ratelimit))
+    /* 即保证当前线程脏页数超过门限，或者当前CPU超过门限，都要回收 */
+	p =  this_cpu_ptr(&bdp_ratelimits);    /* 当前CPU的脏页计数 */
+	if (unlikely(current->nr_dirtied >= ratelimit))   /* 如果当前线程脏页数超过门限值，则肯定会触发下面的回收流程。同时重新计算当前CPU的脏页数 */
 		*p = 0;
-	else if (unlikely(*p >= ratelimit_pages)) {
+	else if (unlikely(*p >= ratelimit_pages)) {  /* 默认值为32页 */ /* 当前线程的脏页数未超过门限值，但是当前CPU的脏页数超过CPU脏页门限值，则设置门限为0，肯定会触发回收。同时重新计算当前CPU的脏页数 *
 		*p = 0;
 		ratelimit = 0;
 	}
@@ -1914,7 +1920,7 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	 * short-lived tasks (eg. gcc invocations in a kernel build) escaping
 	 * the dirty throttling and livelock other long-run dirtiers.
 	 */
-	p = this_cpu_ptr(&dirty_throttle_leaks);
+	p = this_cpu_ptr(&dirty_throttle_leaks);    /* 退出的线程，也放在这里处理 */
 	if (*p > 0 && current->nr_dirtied < ratelimit) {
 		unsigned long nr_pages_dirtied;
 		nr_pages_dirtied = min(*p, ratelimit - current->nr_dirtied);
@@ -1923,8 +1929,8 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	}
 	preempt_enable();
 
-	if (unlikely(current->nr_dirtied >= ratelimit))
-		balance_dirty_pages(wb, current->nr_dirtied);
+	if (unlikely(current->nr_dirtied >= ratelimit))   /* 当前线程脏页超过门限值 */
+		balance_dirty_pages(wb, current->nr_dirtied);  // 刷脏页
 
 	wb_put(wb);
 }
@@ -2350,6 +2356,8 @@ int generic_writepages(struct address_space *mapping,
 
 EXPORT_SYMBOL(generic_writepages);
 
+//调用writepages方法将所有的脏页提交到块设备
+// 它负责调用底层文件系统的a_ops->writepages将pages写入后端存储。
 int do_writepages(struct address_space *mapping, struct writeback_control *wbc)
 {
 	int ret;
@@ -2361,6 +2369,7 @@ int do_writepages(struct address_space *mapping, struct writeback_control *wbc)
 	wb_bandwidth_estimate_start(wb);
 	while (1) {
 		if (mapping->a_ops->writepages)
+            // 调用对应文件系统中注册的 writepages， 调用writepages方法将所有的脏页提交到块设备
 			ret = mapping->a_ops->writepages(mapping, wbc);
 		else
 			ret = generic_writepages(mapping, wbc);

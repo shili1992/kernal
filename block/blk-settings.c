@@ -393,7 +393,7 @@ void disk_update_readahead(struct gendisk *disk)
 	 */
 	disk->bdi->ra_pages =
 		max(queue_io_opt(q) * 2 / PAGE_SIZE, VM_READAHEAD_PAGES);
-	disk->bdi->io_pages = queue_max_sectors(q) >> (PAGE_SHIFT - 9);
+	disk->bdi->xio_pages = queue_max_sectors(q) >> (PAGE_SHIFT - 9);
 }
 EXPORT_SYMBOL_GPL(disk_update_readahead);
 

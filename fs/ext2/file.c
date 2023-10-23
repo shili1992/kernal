@@ -167,8 +167,9 @@ static ssize_t ext2_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (IS_DAX(iocb->ki_filp->f_mapping->host))
 		return ext2_dax_read_iter(iocb, to);
 #endif
-	return generic_file_read_iter(iocb, to);
+	return generic_file_read_iter(iocb, to); // 直接调用vfs函数 generic_file_read_iter
 }
+
 
 static ssize_t ext2_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -176,6 +177,7 @@ static ssize_t ext2_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (IS_DAX(iocb->ki_filp->f_mapping->host))
 		return ext2_dax_write_iter(iocb, from);
 #endif
+    // 调用vfs 的 generic_file_write_iter 函数， 反向调用流程
 	return generic_file_write_iter(iocb, from);
 }
 

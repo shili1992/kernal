@@ -507,6 +507,7 @@ size_t fault_in_iov_iter_writeable(const struct iov_iter *i, size_t size)
 }
 EXPORT_SYMBOL(fault_in_iov_iter_writeable);
 
+// 在使用之前，必须初始化iov_iter结构体，用于包含一个（已填充的）iovec结构体：
 void iov_iter_init(struct iov_iter *i, unsigned int direction,
 			const struct iovec *iov, unsigned long nr_segs,
 			size_t count)
@@ -660,6 +661,7 @@ static size_t csum_and_copy_to_pipe_iter(const void *addr, size_t bytes,
 	return off;
 }
 
+//将字节数据从addr地址指向的缓冲区复制字节个数为bytes的数据到迭代器指针指向的用户空间缓冲区地址
 size_t _copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
 {
 	if (unlikely(iov_iter_is_pipe(i)))
@@ -765,6 +767,7 @@ size_t _copy_mc_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
 EXPORT_SYMBOL_GPL(_copy_mc_to_iter);
 #endif /* CONFIG_ARCH_HAS_COPY_MC */
 
+// copy_from_iter（）将数据从用户空间缓冲区复制到addr
 size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
 {
 	if (unlikely(iov_iter_is_pipe(i))) {
@@ -877,6 +880,7 @@ static size_t __copy_page_to_iter(struct page *page, size_t offset, size_t bytes
 	return 0;
 }
 
+// 数据在page页结构和迭代器iov_iter之间进行拷贝
 size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i)
 {
@@ -902,6 +906,7 @@ size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 }
 EXPORT_SYMBOL(copy_page_to_iter);
 
+// 数据在page页结构和迭代器iov_iter之间进行拷贝
 size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i)
 {
@@ -1518,6 +1523,9 @@ static struct page *first_bvec_segment(const struct iov_iter *i,
 	return page;
 }
 
+// 将用户空间内存映射到内核中
+// @param i中包含 用户空间内存
+// @pages 返回的映射后的内核page
 ssize_t iov_iter_get_pages(struct iov_iter *i,
 		   struct page **pages, size_t maxsize, unsigned maxpages,
 		   size_t *start)
@@ -1541,6 +1549,10 @@ ssize_t iov_iter_get_pages(struct iov_iter *i,
 
 		addr = first_iovec_segment(i, &len, start, maxsize, maxpages);
 		n = DIV_ROUND_UP(len, PAGE_SIZE);
+        // 使用get_user_pages_fast将用户态进程使用的内存在内核态分配一块虚拟地址进行页表映射
+        // ，此时相当于有两个页表映射同一块物理内存
+        // 用户区进程使用内存的某个页(struct page)，然后可以在内核区通过kmap_atomic(),
+        // kmap()等函数映射到内核区线性地址，从而可以在内核区向其写入数据。
 		res = get_user_pages_fast(addr, n, gup_flags, pages);
 		if (unlikely(res <= 0))
 			return res;
@@ -1800,6 +1812,7 @@ static int bvec_npages(const struct iov_iter *i, int maxpages)
 	return npages;
 }
 
+// 获取i迭代器中缓冲区占用的页面数， 如果超过maxpages 这返回 maxpages
 int iov_iter_npages(const struct iov_iter *i, int maxpages)
 {
 	if (unlikely(!i->count))

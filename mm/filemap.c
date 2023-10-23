@@ -698,6 +698,7 @@ EXPORT_SYMBOL_GPL(filemap_range_needs_writeback);
  *
  * Return: error status of the address space.
  */
+ //将page cache里的对应脏数据刷盘，以保障正确的写入顺序, 最终通过调用do_writepages()函数将脏页刷盘
 int filemap_write_and_wait_range(struct address_space *mapping,
 				 loff_t lstart, loff_t lend)
 {
@@ -804,6 +805,7 @@ EXPORT_SYMBOL(file_check_and_advance_wb_err);
  *
  * Return: %0 on success, negative error code otherwise.
  */
+ // 调用do_writepages()刷出脏页，然后调用__filemap_fdatawait_range()，等待所有writeback的page完成；
 int file_write_and_wait_range(struct file *file, loff_t lstart, loff_t lend)
 {
 	int err = 0, err2;
@@ -2337,6 +2339,12 @@ static void shrink_readahead_size_eio(struct file_ra_state *ra)
  * the batch may have Readahead set or be not Uptodate so that the
  * caller can take the appropriate action.
  */
+// 指定地址空间中读取连续的页框，并将它们存储在指定的 pages 数组中
+//参数解析：
+//- mapping：要读取的文件的地址空间。
+//- index：将从该索引开始读取页框。
+//- max：要读取的页框数量。
+//- pvec：指向包含读取的页框的指针数组。
 static void filemap_get_read_batch(struct address_space *mapping,
 		pgoff_t index, pgoff_t max, struct pagevec *pvec)
 {
@@ -2377,6 +2385,7 @@ retry:
 	rcu_read_unlock();
 }
 
+// 调用注册的 readpage 读取page
 static int filemap_read_page(struct file *file, struct address_space *mapping,
 		struct page *page)
 {
@@ -2389,7 +2398,7 @@ static int filemap_read_page(struct file *file, struct address_space *mapping,
 	 */
 	ClearPageError(page);
 	/* Start the actual read. The read will unlock the page. */
-	error = mapping->a_ops->readpage(file, page);
+	error = mapping->a_ops->readpage(file, page); // readpage 为函数指针
 	if (error)
 		return error;
 
@@ -2428,6 +2437,7 @@ static bool filemap_range_uptodate(struct address_space *mapping,
 	return mapping->a_ops->is_partially_uptodate(page, pos, count);
 }
 
+// 等待io处理完成.器件处理完io请求后，用 最新数据填充page,并释放page lock
 static int filemap_update_page(struct kiocb *iocb,
 		struct address_space *mapping, struct iov_iter *iter,
 		struct page *page)
@@ -2478,6 +2488,7 @@ unlock_mapping:
 	return error;
 }
 
+//创建一个page, 并且从磁盘中读取数据填充page。 并添加到pvec中
 static int filemap_create_page(struct file *file,
 		struct address_space *mapping, pgoff_t index,
 		struct pagevec *pvec)
@@ -2485,7 +2496,7 @@ static int filemap_create_page(struct file *file,
 	struct page *page;
 	int error;
 
-	page = page_cache_alloc(mapping);
+	page = page_cache_alloc(mapping);  // 分配pagecache， 用 GFP_KERNEL 标志分配新page
 	if (!page)
 		return -ENOMEM;
 
@@ -2502,19 +2513,20 @@ static int filemap_create_page(struct file *file,
 	 * simple.
 	 */
 	filemap_invalidate_lock_shared(mapping);
+    // 添加到lru pagecache
 	error = add_to_page_cache_lru(page, mapping, index,
 			mapping_gfp_constraint(mapping, GFP_KERNEL));
 	if (error == -EEXIST)
 		error = AOP_TRUNCATED_PAGE;
 	if (error)
 		goto error;
-
+    // 调用注册的 readpage 读取page
 	error = filemap_read_page(file, mapping, page);
 	if (error)
 		goto error;
 
 	filemap_invalidate_unlock_shared(mapping);
-	pagevec_add(pvec, page);
+	pagevec_add(pvec, page);  //添加到page数组中
 	return 0;
 error:
 	filemap_invalidate_unlock_shared(mapping);
@@ -2522,6 +2534,7 @@ error:
 	return error;
 }
 
+//  启动异步预读再读入一批page备用
 static int filemap_readahead(struct kiocb *iocb, struct file *file,
 		struct address_space *mapping, struct page *page,
 		pgoff_t last_index)
@@ -2533,6 +2546,11 @@ static int filemap_readahead(struct kiocb *iocb, struct file *file,
 	return 0;
 }
 
+// retrieves a set of pages from a file's address space
+// 先从cache中获取， 如果一些page 从cache中没有获取 从磁盘获取。
+// 1. The function first checks if the requested pages are already present in the page cache.
+// 2. If some of the requested pages are not present in the cache, it reads them from disk and adds them to the cache.
+// 3. The function then copies the requested pages into the provided array.
 static int filemap_get_pages(struct kiocb *iocb, struct iov_iter *iter,
 		struct pagevec *pvec)
 {
@@ -2550,17 +2568,30 @@ retry:
 	if (fatal_signal_pending(current))
 		return -EINTR;
 
+    //  批量获取page,  获取一批页以供读取. 在page cache中查找index的page，这个page是read需要用的
 	filemap_get_read_batch(mapping, index, last_index - 1, pvec);
-	if (!pagevec_count(pvec)) {
+	if (!pagevec_count(pvec)) { // 如果没有，说明也不在页缓存中，那么就同步地去
 		if (iocb->ki_flags & IOCB_NOIO)
 			return -EAGAIN;
+        /* page cache中没有找到index的page，只能从存储器件中读取数据了。既然需要
+            通过disk io读取数据,就多预读一些page。参数index表示从哪个page开始读取，
+             req_size = last_index - index个page表示read需要读多少个page。
+             page_cache_sync_readahead一般会读取超过req_size个page，前req_size
+           个page是本次read请求的，多读的page本次用不到，提前读出来给后继访问使用。
+            多读的page中第一个page设置PageReadahead标记。
+           page_cache_sync_readahead申请page内存，并加入到page cache
+           中,然后通过submit_bio提交bio请求就返回了，至于器件有没有处理完这个io请求，
+            page_cache_sync_readahead不关心，不会等待页面变成PageUptodate。*/
 		page_cache_sync_readahead(mapping, ra, filp, index,
 				last_index - index);
+        /*经过上面的预读,在page cache中大概率能找到index的page*/
 		filemap_get_read_batch(mapping, index, last_index - 1, pvec);
 	}
-	if (!pagevec_count(pvec)) {
+	if (!pagevec_count(pvec)) {  // 再判断一次，如果还不在
 		if (iocb->ki_flags & (IOCB_NOWAIT | IOCB_WAITQ))
 			return -EAGAIN;
+        // 在cache中不存在，触发缺页处理，读取磁盘
+        // 创建一个page, 并且从磁盘中读取数据填充page。 并添加到pvec中
 		err = filemap_create_page(filp, mapping,
 				iocb->ki_pos >> PAGE_SHIFT, pvec);
 		if (err == AOP_TRUNCATED_PAGE)
@@ -2568,12 +2599,19 @@ retry:
 		return err;
 	}
 
+//    获取页之后，如果有异步的预读请求，那就异步地预读取页
 	page = pvec->pages[pagevec_count(pvec) - 1];
-	if (PageReadahead(page)) {
+	if (PageReadahead(page))
+    {
+      /* 如果这个page设置了PageReadahead标记，意味着预读窗口中未访问的page不多了，
+         需要启动异步预读再读入一批page备用。 */
+        // 在顺序io的情况下，通过预判进行预读可以提升下一次读取的性能，减少磁盘io
 		err = filemap_readahead(iocb, filp, mapping, page, last_index);
 		if (err)
 			goto err;
 	}
+    /* 如果从page cache中找到的page不是PageUptodate状态，说明器件还没有处理完成，
+     * 等待io处理完成.器件处理完io请求后，用 最新数据填充page,并释放page lock*/
 	if (!PageUptodate(page)) {
 		if ((iocb->ki_flags & IOCB_WAITQ) && pagevec_count(pvec) > 1)
 			iocb->ki_flags |= IOCB_NOWAIT;
@@ -2611,7 +2649,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 {
 	struct file *filp = iocb->ki_filp;
 	struct file_ra_state *ra = &filp->f_ra;
-	struct address_space *mapping = filp->f_mapping;
+	struct address_space *mapping = filp->f_mapping; // 物理文件映射到内存page
 	struct inode *inode = mapping->host;
 	struct pagevec pvec;
 	int i, error = 0;
@@ -2626,8 +2664,16 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
 	pagevec_init(&pvec);
 
+
+    /* 循环处理[index, last_index] page，先在page cache中查找,如果能找到并且
+        是PageUptodate状态，则将page数据拷贝到用户态buf。如果找不到，触发同步预读
+        page_cache_sync_readahead从存储器件读入一批page(大于
+        last_index - index个页面)。并将read需要的最后一个页面（last_index
+        对应的页面）的下一个页面设置PageReadahead。访问到这个标记的页面时触发异步预读
+        page_cache_async_readahead从存储器件中再读入一批page，并把第一个page设置
+        成PageReadahead。*/
 	do {
-		cond_resched();
+		cond_resched(); //  while 循环中要先执行 cond_resched()，告诉内核调度可以主动让出 CPU
 
 		/*
 		 * If we've already successfully copied some data, then we
@@ -2637,6 +2683,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		if ((iocb->ki_flags & IOCB_WAITQ) && already_read)
 			iocb->ki_flags |= IOCB_NOWAIT;
 
+        // 先从cache中获取， 如果一些page 从cache中没有获取 从磁盘获取。
 		error = filemap_get_pages(iocb, iter, &pvec);
 		if (error < 0)
 			break;
@@ -2668,6 +2715,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		    ra->prev_pos >> PAGE_SHIFT)
 			mark_page_accessed(pvec.pages[0]);
 
+//        iter->count=0表示read需要的数据已经全部拷贝完了 */
 		for (i = 0; i < pagevec_count(&pvec); i++) {
 			struct page *page = pvec.pages[i];
 			size_t page_size = thp_size(page);
@@ -2692,6 +2740,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 					flush_dcache_page(page + j);
 			}
 
+            // 将内核空间的数据拷贝到 用户的缓冲区中
 			copied = copy_page_to_iter(page, offset, bytes, iter);
 
 			already_read += copied;
@@ -2705,7 +2754,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		}
 put_pages:
 		for (i = 0; i < pagevec_count(&pvec); i++)
-			put_page(pvec.pages[i]);
+			put_page(pvec.pages[i]);    // 将page放入page cache缓存
 		pagevec_reinit(&pvec);
 	} while (iov_iter_count(iter) && iocb->ki_pos < isize && !error);
 
@@ -2745,7 +2794,7 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	if (!count)
 		return 0; /* skip atime */
 
-	if (iocb->ki_flags & IOCB_DIRECT) {
+	if (iocb->ki_flags & IOCB_DIRECT) {  // direct io
 		struct file *file = iocb->ki_filp;
 		struct address_space *mapping = file->f_mapping;
 		struct inode *inode = mapping->host;
@@ -2757,6 +2806,7 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 						iocb->ki_pos + count - 1))
 				return -EAGAIN;
 		} else {
+            //将page cache里的对应脏数据刷盘，以保障正确的写入顺序, 最终通过调用do_writepages()函数将脏页刷盘
 			retval = filemap_write_and_wait_range(mapping,
 						iocb->ki_pos,
 					        iocb->ki_pos + count - 1);
@@ -2766,6 +2816,7 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 
 		file_accessed(file);
 
+        // 执行 真正的 direct io实现
 		retval = mapping->a_ops->direct_IO(iocb, iter);
 		if (retval >= 0) {
 			iocb->ki_pos += retval;
@@ -3692,6 +3743,7 @@ void dio_warn_stale_pagecache(struct file *filp)
 	}
 }
 
+// direct 写流程
 ssize_t
 generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -3712,6 +3764,7 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 					   pos + write_len - 1))
 			return -EAGAIN;
 	} else {
+        //  对目的区域的缓存进行进行刷写
 		written = filemap_write_and_wait_range(mapping, pos,
 							pos + write_len - 1);
 		if (written)
@@ -3724,6 +3777,7 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 	 * about to write.  We do this *before* the write so that we can return
 	 * without clobbering -EIOCBQUEUED from ->direct_IO().
 	 */
+    // 使缓存页失效
 	written = invalidate_inode_pages2_range(mapping,
 					pos >> PAGE_SHIFT, end);
 	/*
@@ -3736,6 +3790,7 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 		goto out;
 	}
 
+    // 实际的 io写入，  具体由各个文件系统实现
 	written = mapping->a_ops->direct_IO(iocb, from);
 
 	/*
@@ -3756,6 +3811,7 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 	 * Skip invalidation for async writes or if mapping has no pages.
 	 */
 	if (written > 0 && mapping->nrpages &&
+            // 使缓存页失效， 避免预读等操作导致缓存数据与磁盘数据不一致
 	    invalidate_inode_pages2_range(mapping, pos >> PAGE_SHIFT, end))
 		dio_warn_stale_pagecache(file);
 
@@ -3797,6 +3853,7 @@ struct page *grab_cache_page_write_begin(struct address_space *mapping,
 }
 EXPORT_SYMBOL(grab_cache_page_write_begin);
 
+// buffer写入
 ssize_t generic_perform_write(struct file *file,
 				struct iov_iter *i, loff_t pos)
 {
@@ -3806,6 +3863,7 @@ ssize_t generic_perform_write(struct file *file,
 	ssize_t written = 0;
 	unsigned int flags = 0;
 
+    // 循环将所有的写入（可能只在buffer中）
 	do {
 		struct page *page;
 		unsigned long offset;	/* Offset into pagecache page */
@@ -3833,7 +3891,7 @@ again:
 			status = -EINTR;
 			break;
 		}
-
+        // 1. 分配磁盘快哦那劲 和 缓存页
 		status = a_ops->write_begin(file, mapping, pos, bytes, flags,
 						&page, &fsdata);
 		if (unlikely(status < 0))
@@ -3842,9 +3900,11 @@ again:
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
 
+        //2. 从iter将数据 拷贝到 刚分配的内核缓存页中
 		copied = copy_page_from_iter_atomic(page, offset, bytes, i);
 		flush_dcache_page(page);
 
+        // 3.
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
 						page, fsdata);
 		if (unlikely(status != copied)) {
@@ -3867,7 +3927,7 @@ again:
 		}
 		pos += status;
 		written += status;
-
+        //4. 检查一下页缓存的总容量， 如果超过设置的水线，则会将数据强制写入到持久化设备中
 		balance_dirty_pages_ratelimited(mapping);
 	} while (iov_iter_count(i));
 
@@ -3915,6 +3975,7 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (err)
 		goto out;
 
+    // direct 写入
 	if (iocb->ki_flags & IOCB_DIRECT) {
 		loff_t pos, endbyte;
 
@@ -3961,6 +4022,7 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			 */
 		}
 	} else {
+        // buffer 写入
 		written = generic_perform_write(file, from, iocb->ki_pos);
 		if (likely(written > 0))
 			iocb->ki_pos += written;

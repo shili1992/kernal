@@ -47,6 +47,7 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 	if (!mapping || len < 0)
 		return -EINVAL;
 
+    // 获取inode对应super_block 中 s_bdi
 	bdi = inode_to_bdi(mapping->host);
 
 	if (IS_DAX(inode) || (bdi == &noop_backing_dev_info)) {

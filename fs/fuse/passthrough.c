@@ -71,6 +71,9 @@ static void fuse_aio_rw_complete(struct kiocb *iocb, long res, long res2)
 	iocb_fuse->ki_complete(iocb_fuse, res, res2);
 }
 
+// 该文件是passthrough打开， 则走 passthrough read
+// 最终实际就是调用要passthrough 文件的file-> f_op -> read_iter
+// 相当于通过fd1 读文件， 将读请求转发到 对应的fd2上， 没有走fuse daemon那一套东西
 ssize_t fuse_passthrough_read_iter(struct kiocb *iocb_fuse,
 				   struct iov_iter *iter)
 {
@@ -85,6 +88,7 @@ ssize_t fuse_passthrough_read_iter(struct kiocb *iocb_fuse,
 
 	old_cred = override_creds(ff->passthrough.cred);
 	if (is_sync_kiocb(iocb_fuse)) {
+        // 调用调用 passthrough_filp->f_op->read_iter passthrough_filp->f_op->read  进行读取数据
 		ret = vfs_iter_read(passthrough_filp, iter, &iocb_fuse->ki_pos,
 				    iocb_to_rw_flags(iocb_fuse->ki_flags,
 						     PASSTHROUGH_IOCB_MASK));
@@ -206,7 +210,8 @@ int fuse_passthrough_open(struct fuse_dev *fud, u32 lower_fd)
 	if (!fc->passthrough)
 		return -EPERM;
 
-	passthrough_filp = fget(lower_fd);
+    // 从 libfuse 中open 得到的文件fd， 获取fd对应的file数据结构
+	passthrough_filp = fget(lower_fd); // 根据fd 获取 file
 	if (!passthrough_filp) {
 		pr_err("FUSE: invalid file descriptor for passthrough.\n");
 		return -EBADF;
@@ -219,7 +224,7 @@ int fuse_passthrough_open(struct fuse_dev *fud, u32 lower_fd)
 		goto err_free_file;
 	}
 
-	passthrough_inode = file_inode(passthrough_filp);
+	passthrough_inode = file_inode(passthrough_filp);  // 就是获得fd
 	passthrough_sb = passthrough_inode->i_sb;
 	if (passthrough_sb->s_stack_depth >= FILESYSTEM_MAX_STACK_DEPTH) {
 		pr_err("FUSE: fs stacking depth exceeded for passthrough\n");
@@ -238,6 +243,7 @@ int fuse_passthrough_open(struct fuse_dev *fud, u32 lower_fd)
 
 	idr_preload(GFP_KERNEL);
 	spin_lock(&fc->passthrough_req_lock);
+    // 获取fd对应的文件结构 存储在关联的打开/创建fuse_req中。 返回 新分配的id
 	res = idr_alloc(&fc->passthrough_req, passthrough, 1, 0, GFP_ATOMIC);
 	spin_unlock(&fc->passthrough_req_lock);
 	idr_preload_end();
@@ -254,6 +260,7 @@ err_free_file:
 	return res;
 }
 
+// 通过open返回的passthrough_fh 建立 fuse_passthrough结构
 int fuse_passthrough_setup(struct fuse_conn *fc, struct fuse_file *ff,
 			   struct fuse_open_out *openarg)
 {
@@ -268,6 +275,7 @@ int fuse_passthrough_setup(struct fuse_conn *fc, struct fuse_file *ff,
 		return -EINVAL;
 
 	spin_lock(&fc->passthrough_req_lock);
+    // The pointer formerly associated with this ID.
 	passthrough = idr_remove(&fc->passthrough_req, passthrough_fh);
 	spin_unlock(&fc->passthrough_req_lock);
 

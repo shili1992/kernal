@@ -1101,17 +1101,20 @@ int __generic_file_fsync(struct file *file, loff_t start, loff_t end,
 	int err;
 	int ret;
 
+    // 调用__filemap_fdatawait_range()，等待所有writeback的page完成
 	err = file_write_and_wait_range(file, start, end);
 	if (err)
 		return err;
 
 	inode_lock(inode);
+    // issue and wait所有的文件系统所在的块设备上的dirty bh落盘
 	ret = sync_mapping_buffers(inode->i_mapping);
 	if (!(inode->i_state & I_DIRTY_ALL))
 		goto out;
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
 		goto out;
 
+    // 它会调用write_single_inode() with nr_to_write = 0，最终只会将inode 写出，并等待完成；
 	err = sync_inode_metadata(inode, 1);
 	if (ret == 0)
 		ret = err;

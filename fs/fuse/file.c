@@ -77,7 +77,7 @@ struct fuse_file *fuse_file_alloc(struct fuse_mount *fm)
 	RB_CLEAR_NODE(&ff->polled_node);
 	init_waitqueue_head(&ff->poll_wait);
 
-	ff->kh = atomic64_inc_return(&fm->fc->khctr);
+	ff->kh = atomic64_inc_return(&fm->fc->khctr);  // kernal 原子自增
 
 	return ff;
 }
@@ -146,7 +146,7 @@ struct fuse_file *fuse_file_open(struct fuse_mount *fm, u64 nodeid,
 	struct fuse_file *ff;
 	int opcode = isdir ? FUSE_OPENDIR : FUSE_OPEN;
 
-	ff = fuse_file_alloc(fm);
+	ff = fuse_file_alloc(fm);  // 里面已经分配了 kh
 	if (!ff)
 		return ERR_PTR(-ENOMEM);
 
@@ -157,10 +157,11 @@ struct fuse_file *fuse_file_open(struct fuse_mount *fm, u64 nodeid,
 		struct fuse_open_out outarg;
 		int err;
 
-		err = fuse_send_open(fm, nodeid, open_flags, opcode, &outarg);
+		err = fuse_send_open(fm, nodeid, open_flags, opcode, &outarg);  // 发送open file请求
 		if (!err) {
-			ff->fh = outarg.fh;
+			ff->fh = outarg.fh;  // 保存open 返回用户fh
 			ff->open_flags = outarg.open_flags;
+            // 如果设置了passthrough 通过open返回的passthrough_fh 建立 fuse_passthrough结构
 			fuse_passthrough_setup(fc, ff, &outarg);
 		} else if (err != -ENOSYS) {
 			fuse_file_free(ff);
@@ -717,6 +718,7 @@ static ssize_t fuse_get_res_by_io(struct fuse_io_priv *io)
  * will be equal to the length of the longest contiguous fragment of
  * transferred data starting from the beginning of IO request.
  */
+ // 每个fuse_req 完成调用的回到函数
 static void fuse_aio_complete(struct fuse_io_priv *io, int err, ssize_t pos)
 {
 	int left;
@@ -727,12 +729,15 @@ static void fuse_aio_complete(struct fuse_io_priv *io, int err, ssize_t pos)
 	else if (pos >= 0 && (io->bytes < 0 || pos < io->bytes))
 		io->bytes = pos;
 
+    // daemon每次执行完一个req就会调用callback，callback会递减fuse_io_priv中的req计数
+    // ，当计数为零时则对competion执行唤醒
 	left = --io->reqs;
+    // 如果是同步IO，即使使用了background机制，并且所有io都已经完成了， 则唤醒等待
 	if (!left && io->blocking)
-		complete(io->done);
+		complete(io->done);  //唤醒阻塞的 用户同步io
 	spin_unlock(&io->lock);
 
-	if (!left && !io->blocking) {
+	if (!left && !io->blocking) {  // aio 那种情况，
 		ssize_t res = fuse_get_res_by_io(io);
 
 		if (res >= 0) {
@@ -745,12 +750,14 @@ static void fuse_aio_complete(struct fuse_io_priv *io, int err, ssize_t pos)
 			spin_unlock(&fi->lock);
 		}
 
-		io->iocb->ki_complete(io->iocb, res, 0);
+		io->iocb->ki_complete(io->iocb, res, 0);  // 调用用户设置的 回调函数
 	}
 
 	kref_put(&io->refcnt, fuse_io_release);
 }
 
+// 函数是用来分配一个fuse_io_args结构体的内存空间，
+// 并将其与给定的fuse_io_priv结构体关联起来。
 static struct fuse_io_args *fuse_io_alloc(struct fuse_io_priv *io,
 					  unsigned int npages)
 {
@@ -758,7 +765,7 @@ static struct fuse_io_args *fuse_io_alloc(struct fuse_io_priv *io,
 
 	ia = kzalloc(sizeof(*ia), GFP_KERNEL);
 	if (ia) {
-		ia->io = io;
+		ia->io = io;x
 		ia->ap.pages = fuse_pages_alloc(npages, GFP_KERNEL,
 						&ia->ap.descs);
 		if (!ia->ap.pages) {
@@ -804,6 +811,7 @@ static void fuse_aio_complete_req(struct fuse_mount *fm, struct fuse_args *args,
 	fuse_io_free(ia);
 }
 
+// 异步发送请求
 static ssize_t fuse_async_req_send(struct fuse_mount *fm,
 				   struct fuse_io_args *ia, size_t num_bytes)
 {
@@ -816,9 +824,10 @@ static ssize_t fuse_async_req_send(struct fuse_mount *fm,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
+    // 设置回调cb, 当前线程发送后就返回了， cb则被发送rsp时执行
 	ia->ap.args.end = fuse_aio_complete_req;
 	ia->ap.args.may_block = io->should_dirty;
-	err = fuse_simple_background(fm, &ia->ap.args, GFP_KERNEL);
+	err = fuse_simple_background(fm, &ia->ap.args, GFP_KERNEL); // 异步发送请求
 	if (err)
 		fuse_aio_complete_req(fm, &ia->ap.args, err);
 
@@ -838,10 +847,10 @@ static ssize_t fuse_send_read(struct fuse_io_args *ia, loff_t pos, size_t count,
 		ia->read.in.lock_owner = fuse_lock_owner_id(fm->fc, owner);
 	}
 
-	if (ia->io->async)
+	if (ia->io->async)  // 异步发送
 		return fuse_async_req_send(fm, ia, count);
 
-	return fuse_simple_request(fm, &ia->ap.args);
+	return fuse_simple_request(fm, &ia->ap.args);  // 同步发送
 }
 
 static void fuse_read_update_size(struct inode *inode, loff_t size,
@@ -979,6 +988,7 @@ static void fuse_readpages_end(struct fuse_mount *fm, struct fuse_args *args,
 	fuse_io_free(ia);
 }
 
+// 目前只有readahead的时候调用
 static void fuse_send_readpages(struct fuse_io_args *ia, struct file *file)
 {
 	struct fuse_file *ff = file->private_data;
@@ -1002,7 +1012,7 @@ static void fuse_send_readpages(struct fuse_io_args *ia, struct file *file)
 
 	fuse_read_args_fill(ia, file, pos, count, FUSE_READ);
 	ia->read.attr_ver = fuse_get_attr_version(fm->fc);
-	if (fm->fc->async_read) {
+	if (fm->fc->async_read) { // 默认是true, 读取page的时候都用异步读取
 		ia->ff = fuse_file_get(ff);
 		ap->args.end = fuse_readpages_end;
 		err = fuse_simple_background(fm, &ap->args, GFP_KERNEL);
@@ -1015,6 +1025,7 @@ static void fuse_send_readpages(struct fuse_io_args *ia, struct file *file)
 	fuse_readpages_end(fm, &ap->args, err);
 }
 
+// 地址空间设置的page
 static void fuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -1025,9 +1036,9 @@ static void fuse_readahead(struct readahead_control *rac)
 		return;
 
 	max_pages = min_t(unsigned int, fc->max_pages,
-			fc->max_read / PAGE_SIZE);
+			fc->max_read / PAGE_SIZE);  // 这里设置最大读取
 
-	for (;;) {
+	for (;;) {  // 将请求拆分成 max_pages
 		struct fuse_io_args *ia;
 		struct fuse_args_pages *ap;
 
@@ -1106,6 +1117,7 @@ static unsigned int fuse_write_flags(struct kiocb *iocb)
 	return flags;
 }
 
+// 发送写请求给daemon
 static ssize_t fuse_send_write(struct fuse_io_args *ia, loff_t pos,
 			       size_t count, fl_owner_t owner)
 {
@@ -1123,10 +1135,10 @@ static ssize_t fuse_send_write(struct fuse_io_args *ia, loff_t pos,
 		inarg->lock_owner = fuse_lock_owner_id(fm->fc, owner);
 	}
 
-	if (ia->io->async)
+	if (ia->io->async)  // 可以并行发送
 		return fuse_async_req_send(fm, ia, count);
 
-	err = fuse_simple_request(fm, &ia->ap.args);
+	err = fuse_simple_request(fm, &ia->ap.args);  // 发送写请求给daemon, 同步阻塞的方式
 	if (!err && ia->write.out.size > count)
 		err = -EIO;
 
@@ -1200,6 +1212,7 @@ static ssize_t fuse_send_write_pages(struct fuse_io_args *ia,
 	return err;
 }
 
+// 实现对 多个page的写入
 static ssize_t fuse_fill_write_pages(struct fuse_io_args *ia,
 				     struct address_space *mapping,
 				     struct iov_iter *ii, loff_t pos,
@@ -1266,6 +1279,8 @@ static ssize_t fuse_fill_write_pages(struct fuse_io_args *ia,
 			ia->write.page_locked = true;
 			break;
 		}
+        //如果没有指定big_writes标志，则只fill一页就就跳出循环，而指定该标志后，
+        // 该值会提高到max_write
 		if (!fc->big_writes)
 			break;
 	} while (iov_iter_count(ii) && count < fc->max_write &&
@@ -1301,7 +1316,7 @@ static ssize_t fuse_perform_write(struct kiocb *iocb,
 		struct fuse_io_args ia = {};
 		struct fuse_args_pages *ap = &ia.ap;
 		unsigned int nr_pages = fuse_wr_pages(pos, iov_iter_count(ii),
-						      fc->max_pages);
+						      fc->max_pages); // 一次分配最大的page数量
 
 		ap->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &ap->descs);
 		if (!ap->pages) {
@@ -1309,6 +1324,7 @@ static ssize_t fuse_perform_write(struct kiocb *iocb,
 			break;
 		}
 
+        /// 多个内核page的写入
 		count = fuse_fill_write_pages(&ia, mapping, ii, pos, nr_pages);
 		if (count <= 0) {
 			err = count;
@@ -1440,12 +1456,13 @@ static int fuse_get_user_pages(struct fuse_args_pages *ap, struct iov_iter *ii,
 	ssize_t ret = 0;
 
 	/* Special case for kernel I/O: can copy directly into the buffer */
+    // 如果buffer 是内核buffer, 这直接将指针赋值给 ap
 	if (iov_iter_is_kvec(ii)) {
 		unsigned long user_addr = fuse_get_user_addr(ii);
 		size_t frag_size = fuse_get_frag_size(ii, *nbytesp);
 
 		if (write)
-			ap->args.in_args[1].value = (void *) user_addr;
+			ap->args.in_args[1].value = (void *) user_addr; // 直接将user的地址复制给 ap 结构体中相应的位置
 		else
 			ap->args.out_args[0].value = (void *) user_addr;
 
@@ -1454,9 +1471,11 @@ static int fuse_get_user_pages(struct fuse_args_pages *ap, struct iov_iter *ii,
 		return 0;
 	}
 
+    // 如果是用户空间buffer, 则对内存做映射到内核空间
 	while (nbytes < *nbytesp && ap->num_pages < max_pages) {
 		unsigned npages;
 		size_t start;
+        // 将用户空间内存映射到内核中， 内核page 填充到ap->pages 数组中
 		ret = iov_iter_get_pages(ii, &ap->pages[ap->num_pages],
 					*nbytesp - nbytes,
 					max_pages - ap->num_pages,
@@ -1489,6 +1508,8 @@ static int fuse_get_user_pages(struct fuse_args_pages *ap, struct iov_iter *ii,
 	return ret < 0 ? ret : 0;
 }
 
+// 该函数的主要功能是执行直接IO操作，即将数据从用户空间拷贝到内核空间或从内核空间拷贝到用户空间。
+// 具体而言，函数会根据IO操作的类型（读或写）将请求发送给FUSE守护进程，并等待守护进程处理请求。
 ssize_t fuse_direct_io(struct fuse_io_priv *io, struct iov_iter *iter,
 		       loff_t *ppos, int flags)
 {
@@ -1498,6 +1519,7 @@ ssize_t fuse_direct_io(struct fuse_io_priv *io, struct iov_iter *iter,
 	struct inode *inode = file->f_mapping->host;
 	struct fuse_file *ff = file->private_data;
 	struct fuse_conn *fc = ff->fm->fc;
+    // nmax收到 max_write 和 max_read同时影响，  使用direct_io每次io量为max_write(max_read)
 	size_t nmax = write ? fc->max_write : fc->max_read;
 	loff_t pos = *ppos;
 	size_t count = iov_iter_count(iter);
@@ -1508,6 +1530,8 @@ ssize_t fuse_direct_io(struct fuse_io_priv *io, struct iov_iter *iter,
 	struct fuse_io_args *ia;
 	unsigned int max_pages;
 
+    // 获取i迭代器中缓冲区占用的页面数， 如果超过maxpages 这返回 maxpages
+    // 这里max_pages就是最终使用这么page
 	max_pages = iov_iter_npages(iter, fc->max_pages);
 	ia = fuse_io_alloc(io, max_pages);
 	if (!ia)
@@ -1523,23 +1547,29 @@ ssize_t fuse_direct_io(struct fuse_io_priv *io, struct iov_iter *iter,
 	}
 
 	io->should_dirty = !write && iter_is_iovec(iter);
+    // 将请求拆分， 按照min(max_write, max_read)
 	while (count) {
 		ssize_t nres;
 		fl_owner_t owner = current->files;
+//        当IO的一个块大小很大时，即count值可能很大，当然nmax代表的max_writes值也可能很大，取最小值。
+//        假如设置4M的块大小，max_writes为1M，那么按照1M从用户pages中获得数据。
 		size_t nbytes = min(count, nmax);
 
+        //如果是写将则将用户空间的数据拷贝进来，作为fuse_req中in字段的值；
+        // 如果是读，则将用户空间的地址作为fuse_req中out的值
 		err = fuse_get_user_pages(&ia->ap, iter, &nbytes, write,
 					  max_pages);
 		if (err && !nbytes)
 			break;
 
+        //根据请求类型将请求发送到/dev/fuse，等待其处理
 		if (write) {
 			if (!capable(CAP_FSETID))
 				ia->write.in.write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
-			nres = fuse_send_write(ia, pos, nbytes, owner);
+			nres = fuse_send_write(ia, pos, nbytes, owner); // 发送写请求给daemon
 		} else {
-			nres = fuse_send_read(ia, pos, nbytes, owner);
+			nres = fuse_send_read(ia, pos, nbytes, owner); // 发送读请求给daemon
 		}
 
 		if (!io->async || nres < 0) {
@@ -1562,12 +1592,13 @@ ssize_t fuse_direct_io(struct fuse_io_priv *io, struct iov_iter *iter,
 			break;
 		}
 		if (count) {
+            // 获取i迭代器中缓冲区占用的页面数
 			max_pages = iov_iter_npages(iter, fc->max_pages);
 			ia = fuse_io_alloc(io, max_pages);
 			if (!ia)
 				break;
 		}
-	}
+	} // end for
 	if (ia)
 		fuse_io_free(ia);
 	if (res > 0)
@@ -1597,7 +1628,7 @@ static ssize_t fuse_direct_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	ssize_t res;
 
-	if (!is_sync_kiocb(iocb) && iocb->ki_flags & IOCB_DIRECT) {
+	if (!is_sync_kiocb(iocb) && iocb->ki_flags & IOCB_DIRECT) { //根据kiocb->ki_complete回调是否为NULL，设置本次directIO是同步or异步
 		res = fuse_direct_IO(iocb, to);
 	} else {
 		struct fuse_io_priv io = FUSE_IO_PRIV_SYNC(iocb);
@@ -1633,6 +1664,8 @@ static ssize_t fuse_direct_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	return res;
 }
 
+// fuse 文件系统对应的读取接口
+// iov_iter 为用户空间的内存空间迭代器
 static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct file *file = iocb->ki_filp;
@@ -1659,7 +1692,7 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	}
 #endif
 
-	if (ff->passthrough.filp)
+	if (ff->passthrough.filp)  // 如果该文件是passthrough 则走passthrough路线
 		return fuse_passthrough_read_iter(iocb, to);
 	else if (!(ff->open_flags & FOPEN_DIRECT_IO))
 		return fuse_cache_read_iter(iocb, to);
@@ -1667,6 +1700,7 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		return fuse_direct_read_iter(iocb, to);
 }
 
+// fuse 文件系统对应的写入接口
 static ssize_t fuse_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
@@ -1693,12 +1727,12 @@ static ssize_t fuse_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	}
 #endif
 
-	if (ff->passthrough.filp)
+	if (ff->passthrough.filp)  // 直接走passthrough路径
 		return fuse_passthrough_write_iter(iocb, from);
-	else if (!(ff->open_flags & FOPEN_DIRECT_IO))
+	else if (!(ff->open_flags & FOPEN_DIRECT_IO)) // 走page cache路线
 		return fuse_cache_write_iter(iocb, from);
 	else
-		return fuse_direct_write_iter(iocb, from);
+		return fuse_direct_write_iter(iocb, from);  // 走direct io 路线
 }
 
 static void fuse_writepage_free(struct fuse_writepage_args *wpa)
@@ -2949,6 +2983,7 @@ static inline loff_t fuse_round_up(struct fuse_conn *fc, loff_t off)
 	return round_up(off, fc->max_pages << PAGE_SHIFT);
 }
 
+// fuse direct io 实现
 static ssize_t
 fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
@@ -2985,7 +3020,7 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	 * By default, we want to optimize all I/Os with async request
 	 * submission to the client filesystem if supported.
 	 */
-	io->async = ff->fm->fc->async_dio;
+	io->async = ff->fm->fc->async_dio;  // 设置dio 可以并行发送
 	io->iocb = iocb;
 	io->blocking = is_sync_kiocb(iocb);
 
@@ -3003,13 +3038,14 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	if ((offset + count > i_size) && io->write)
 		io->blocking = true;
 
+    // 用户io是阻塞的，但是使用了background机制，
 	if (io->async && io->blocking) {
 		/*
 		 * Additional reference to keep io around after
 		 * calling fuse_aio_complete()
 		 */
 		kref_get(&io->refcnt);
-		io->done = &wait;
+		io->done = &wait;   // 设置后续的 signal
 	}
 
 	if (iov_iter_rw(iter) == WRITE) {
@@ -3026,10 +3062,10 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		fuse_aio_complete(io, ret < 0 ? ret : 0, -1);
 
 		/* we have a non-extending, async request, so return */
-		if (!blocking)
+		if (!blocking) // 用户是aio, 直接返回-EIOCBQUEUED，表示文件系统层已经提交了这次IO。
 			return -EIOCBQUEUED;
 
-		wait_for_completion(&wait);
+		wait_for_completion(&wait);  // 用户是同步io,  阻塞等待 io 完成
 		ret = fuse_get_res_by_io(io);
 	}
 
@@ -3322,11 +3358,12 @@ static const struct file_operations fuse_file_operations = {
 	.copy_file_range = fuse_copy_file_range,
 };
 
+// fuse 实现的 地址空间
 static const struct address_space_operations fuse_file_aops  = {
 	.readpage	= fuse_readpage,
-	.readahead	= fuse_readahead,
-	.writepage	= fuse_writepage,
-	.writepages	= fuse_writepages,
+	.readahead	= fuse_readahead,  // background read
+	.writepage	= fuse_writepage, // background
+	.writepages	= fuse_writepages,  // background
 	.launder_page	= fuse_launder_page,
 	.set_page_dirty	= __set_page_dirty_nobuffers,
 	.bmap		= fuse_bmap,
@@ -3339,7 +3376,7 @@ void fuse_init_file_inode(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
-	inode->i_fop = &fuse_file_operations;
+	inode->i_fop = &fuse_file_operations;  // 设置 文件操作的接口
 	inode->i_data.a_ops = &fuse_file_aops;
 
 	INIT_LIST_HEAD(&fi->write_files);

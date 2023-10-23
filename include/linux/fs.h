@@ -326,16 +326,17 @@ enum rw_hint {
 /* can use bio alloc cache */
 #define IOCB_ALLOC_CACHE	(1 << 21)
 
+// kiocb 中主要保存了一个file结构，以及记录读写偏移，相当于描述了一次IO中文件侧的处理进度
 struct kiocb {
-	struct file		*ki_filp;
+	struct file		*ki_filp;   //open文件创建的file结构
 
 	/* The 'ki_filp' pointer is shared in a union for aio */
 	randomized_struct_fields_start
 
-	loff_t			ki_pos;
-	void (*ki_complete)(struct kiocb *iocb, long ret, long ret2);
+	loff_t			ki_pos;  //数据偏移
+	void (*ki_complete)(struct kiocb *iocb, long ret, long ret2);  //io 完成的回调函数
 	void			*private;
-	int			ki_flags;
+	int			ki_flags;   //IO属性
 	u16			ki_hint;
 	u16			ki_ioprio; /* See linux/ioprio.h */
 	union {
@@ -373,11 +374,14 @@ typedef struct {
 typedef int (*read_actor_t)(read_descriptor_t *, struct page *,
 		unsigned long, unsigned long);
 
+// 从物理文件读取page的核心定义为 a_ops 该结构体定义了从物理文件读取page的一系列函数，
+// 不同的文件系统对应到具体不同的函数实现
 struct address_space_operations {
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
 	int (*readpage)(struct file *, struct page *);
 
 	/* Write back some dirty pages from this mapping. */
+    // 调用writepages方法将所有的脏页提交到块设备
 	int (*writepages)(struct address_space *, struct writeback_control *);
 
 	/* Set a page dirty.  Return true if this dirtied it */
@@ -389,6 +393,7 @@ struct address_space_operations {
 	 */
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
+    // readahead 函数指针用于在文件系统中预读取一定数量的数据到内存中，以便在之后的读取操作中能够更快地访问这些数据
 	void (*readahead)(struct readahead_control *);
 
 	int (*write_begin)(struct file *, struct address_space *mapping,
@@ -403,6 +408,7 @@ struct address_space_operations {
 	void (*invalidatepage) (struct page *, unsigned int, unsigned int);
 	int (*releasepage) (struct page *, gfp_t);
 	void (*freepage)(struct page *);
+    //将文件内容直接读取到 iter中  direct_io
 	ssize_t (*direct_IO)(struct kiocb *, struct iov_iter *iter);
 	/*
 	 * migrate the contents of a page to the specified target. If
@@ -966,13 +972,24 @@ struct fown_struct {
  * @mmap_miss: How many mmap accesses missed in the page cache.
  * @prev_pos: The last byte in the most recent read request.
  */
+ // 预读“窗口”的概念，Linux通过“struct file_ra_state”进行抽象
+ // 每个文件之间预读大小事不会相互影响， 系统打开的每个文件，都有一个file_ra_state实例：
 struct file_ra_state {
-	pgoff_t start;
-	unsigned int size;
-	unsigned int async_size;
-	unsigned int ra_pages;
+	pgoff_t start;        // 在文件内部，预读开始的页面位置， 如果从文件头开始读， 则该值为0
+	unsigned int size;      // 总共读的页面数, 读取size个page放入预读窗口。 如内存不足无法申请page，则预读小于size个page
+	unsigned int async_size;  //  预读窗口中还剩async_size个page时，启动异步预读
+
+
+    /* 预读窗口上限值(单位: page)
+       默认等于struct backing_dev_info->ra_pages, 可通过fadvise调整。
+       如果read需要读的page数量小于ra_pages，最多读取ra_pages个页面。
+       如果read需要读的page数量大于ra_pages，最多读取
+       min { read的page数量,存储器件单次io最大page数量 }个页面。
+       预读窗口中当前有多少个页面由size成员变量表示。
+    */
+    unsigned int ra_pages;  // 单词最大的预读页面数
 	unsigned int mmap_miss;
-	loff_t prev_pos;
+	loff_t prev_pos;    // 上次预读最后的位置
 };
 
 /*
@@ -991,7 +1008,7 @@ struct file {
 	} f_u;
 	struct path		f_path;
 	struct inode		*f_inode;	/* cached value */
-	const struct file_operations	*f_op;
+	const struct file_operations	*f_op; // 对应函数注册的接口接口
 
 	/*
 	 * Protects f_ep, f_flags.
@@ -2047,6 +2064,7 @@ struct dir_context {
 
 struct iov_iter;
 
+// 注册的的文件系统信息
 struct file_operations {
 	struct module *owner;
 	loff_t (*llseek) (struct file *, loff_t, int);
@@ -2146,6 +2164,7 @@ static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
 	return file->f_op->read_iter(kio, iter);
 }
 
+// 将iov_iter描述的内存数据，写到kiocb描述的文件中。
 static inline ssize_t call_write_iter(struct file *file, struct kiocb *kio,
 				      struct iov_iter *iter)
 {
@@ -2967,6 +2986,8 @@ extern int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,
  * to already be updated for the write, and will return either the amount
  * of bytes passed in, or an error if syncing the file failed.
  */
+// 只有对打开文件设置 O_SYNC选项有意义。 当数据写入缓存后 不会马上向用户返回结果，
+// 而是必须等待数据刷入到持久化设备中才会返回
 static inline ssize_t generic_write_sync(struct kiocb *iocb, ssize_t count)
 {
 	if (iocb->ki_flags & IOCB_DSYNC) {

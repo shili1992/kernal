@@ -941,7 +941,7 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	INIT_LIST_HEAD(&fc->devices);
 	idr_init(&fc->passthrough_req);
 	atomic_set(&fc->num_waiting, 0);
-	fc->max_background = FUSE_DEFAULT_MAX_BACKGROUND;
+	fc->max_background = FUSE_DEFAULT_MAX_BACKGROUND;  // 默认是12
 	fc->congestion_threshold = FUSE_DEFAULT_CONGESTION_THRESHOLD;
 	atomic64_set(&fc->khctr, 0);
 	fc->polled_files = RB_ROOT;
@@ -1244,6 +1244,7 @@ struct fuse_init_args {
 	struct fuse_init_out out;
 };
 
+// 处理 init的回复包
 static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 			       int error)
 {
@@ -1292,7 +1293,7 @@ static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 				if (arg->flags & FUSE_READDIRPLUS_AUTO)
 					fc->readdirplus_auto = 1;
 			}
-			if (arg->flags & FUSE_ASYNC_DIO)
+			if (arg->flags & FUSE_ASYNC_DIO)  // daemon中设置了 async_dio， dio可以并行发送了
 				fc->async_dio = 1;
 			if (arg->flags & FUSE_WRITEBACK_CACHE)
 				fc->writeback_cache = 1;
@@ -1311,7 +1312,7 @@ static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 				fc->cache_symlinks = 1;
 			if (arg->flags & FUSE_ABORT_ERROR)
 				fc->abort_err = 1;
-			if (arg->flags & FUSE_MAX_PAGES) {
+			if (arg->flags & FUSE_MAX_PAGES) {  // 从用户传入的max_page 和 fc->max_pages_limit（256）中 取小值， 如果不指定就是 32
 				fc->max_pages =
 					min_t(unsigned int, fc->max_pages_limit,
 					max_t(unsigned int, arg->max_pages, 1));
@@ -1339,10 +1340,11 @@ static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 			fc->no_flock = 1;
 		}
 
+        // 预读的page的大小， min(fm->sb->s_bdi->ra_pages, arg->max_readahead / PAGE_SIZE);
 		fm->sb->s_bdi->ra_pages =
 				min(fm->sb->s_bdi->ra_pages, ra_pages);
 		fc->minor = arg->minor;
-		fc->max_write = arg->minor < 5 ? 4096 : arg->max_write;
+		fc->max_write = arg->minor < 5 ? 4096 : arg->max_write;  // 从daemon 中获取的max_write 设置该值, 直接从client获取
 		fc->max_write = max_t(unsigned, 4096, fc->max_write);
 		fc->conn_init = 1;
 	}
@@ -1366,6 +1368,7 @@ void fuse_send_init(struct fuse_mount *fm)
 	ia->in.major = FUSE_KERNEL_VERSION;
 	ia->in.minor = FUSE_KERNEL_MINOR_VERSION;
 	ia->in.max_readahead = fm->sb->s_bdi->ra_pages * PAGE_SIZE;
+    // 设置支持的特性， 这里已经支持了FUSE_MAX_PAGES 特性
 	ia->in.flags |=
 		FUSE_ASYNC_READ | FUSE_POSIX_LOCKS | FUSE_ATOMIC_O_TRUNC |
 		FUSE_EXPORT_SUPPORT | FUSE_BIG_WRITES | FUSE_DONT_MASK |
@@ -1860,7 +1863,7 @@ static int fuse_init_fs_context(struct fs_context *fsc)
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->max_read = ~0;
+	ctx->max_read = ~0;  // 默认就是无限大
 	ctx->blksize = FUSE_DEFAULT_BLKSIZE;
 	ctx->legacy_opts_show = true;
 

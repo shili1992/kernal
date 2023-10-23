@@ -685,7 +685,7 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 		goto out_err;
 
 	err = -ENOMEM;
-	ff = fuse_file_alloc(fm);
+	ff = fuse_file_alloc(fm);  // 里面已经创建了 kh
 	if (!ff)
 		goto out_put_forget_req;
 
@@ -725,7 +725,7 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 	    fuse_invalid_attr(&outentry.attr))
 		goto out_free_ff;
 
-	ff->fh = outopen.fh;
+	ff->fh = outopen.fh; // 创建返回fd
 	ff->nodeid = outentry.nodeid;
 	ff->open_flags = outopen.open_flags;
 	fuse_passthrough_setup(fc, ff, &outopen);

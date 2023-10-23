@@ -19,9 +19,9 @@ struct kvec {
 
 enum iter_type {
 	/* iter types */
-	ITER_IOVEC,
-	ITER_KVEC,
-	ITER_BVEC,
+	ITER_IOVEC,  // ITER_IOVEC used to iterate over buffers supplied by writev/readv functions,
+	ITER_KVEC,   // ITER_KVEC do almost the same, but with data in kernel space
+	ITER_BVEC,  // ITER_BVEC to work with parts of memory mapped pages.
 	ITER_PIPE,
 	ITER_XARRAY,
 	ITER_DISCARD,
@@ -33,21 +33,24 @@ struct iov_iter_state {
 	unsigned long nr_segs;
 };
 
+// 主要用于描述一次IO流程中用户空间的处理进度
 struct iov_iter {
-	u8 iter_type;
+	u8 iter_type;  // 表明当前的数据块类型， 这个结构支持各种类型的数据块（ITER_IOVEC、 ITER_KVEC、ITER_BVEC、ITER_PIPE、ITER_XARRAY）
 	bool nofault;
-	bool data_source;
-	size_t iov_offset;
-	size_t count;
+	bool data_source; // 表示数据的方向，即write/read, 是从当前结构的用户的角度来说的，比如：当udp socket发送数据到内核，需要将数据copy到这个结构中，就是write.
+	size_t iov_offset; // iov_offset当前处理进度
+	size_t count;  // iovec数组指向的数据个数存放在count中；
+    // 数组每一个元素指向一个struct iovec结构体，这是联合体的一个成员，其它几个也是类似，与iter_type对应
 	union {
-		const struct iovec *iov;
+		const struct iovec *iov; //  以*iov保存内存地址
 		const struct kvec *kvec;
 		const struct bio_vec *bvec;
 		struct xarray *xarray;
 		struct pipe_inode_info *pipe;
 	};
+//    述数组的大小，也是一个联合体成员，另外两个分别对应ITER_PIPE、ITER_XARRAY两种类型的。
 	union {
-		unsigned long nr_segs;
+		unsigned long nr_segs;  // iovec结构体的个数存放在nr_segs中；
 		struct {
 			unsigned int head;
 			unsigned int start_head;

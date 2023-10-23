@@ -31,6 +31,7 @@
  * Initialise a struct file's readahead state.  Assumes that the caller has
  * memset *ra to zero.
  */
+//每个文件被打开时会对该文件的file_ra_state结构体进行初始化
 void
 file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping)
 {
@@ -124,6 +125,7 @@ gfp_t readahead_gfp_mask(struct address_space *x)
 }
 EXPORT_SYMBOL_GPL(readahead_gfp_mask);
 
+// 如果实现了 readahead 则调用readahead, 没有实现则调用readpages， 都是异步
 static void read_pages(struct readahead_control *rac, struct list_head *pages,
 		bool skip_page)
 {
@@ -136,21 +138,21 @@ static void read_pages(struct readahead_control *rac, struct list_head *pages,
 
 	blk_start_plug(&plug);
 
-	if (aops->readahead) {
+	if (aops->readahead) { // 如果实现了 readahead 则调用readahead
 		aops->readahead(rac);
 		/* Clean up the remaining pages */
 		while ((page = readahead_page(rac))) {
 			unlock_page(page);
 			put_page(page);
 		}
-	} else if (aops->readpages) {
+	} else if (aops->readpages) { // 否则调用readpages
 		aops->readpages(rac->file, rac->mapping, pages,
 				readahead_count(rac));
 		/* Clean up the remaining pages */
 		put_pages_list(pages);
 		rac->_index += rac->_nr_pages;
 		rac->_nr_pages = 0;
-	} else {
+	} else {  // 否则一个一个page读取
 		while ((page = readahead_page(rac))) {
 			aops->readpage(rac->file, page);
 			put_page(page);
@@ -181,6 +183,8 @@ out:
  * Context: File is referenced by caller.  Mutexes may be held by caller.
  * May sleep, but will not reenter filesystem to reclaim memory.
  */
+ // Start unchecked readahead.  start readahead
+ //nr_to_read是上层传入的预读的总文件页数,offset是预读的起始文件页
 void page_cache_ra_unbounded(struct readahead_control *ractl,
 		unsigned long nr_to_read, unsigned long lookahead_size)
 {
@@ -218,6 +222,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			 * have a stable reference to this page, and it's
 			 * not worth getting one just for that.
 			 */
+            // 如果实现了 readahead 则调用readahead, 没有实现则调用readpages， 都是异步
 			read_pages(ractl, &page_pool, true);
 			i = ractl->_index + ractl->_nr_pages - index - 1;
 			continue;
@@ -283,6 +288,7 @@ void do_page_cache_ra(struct readahead_control *ractl,
  * Chunk the readahead into 2 megabyte units, so that we don't pin too much
  * memory at once.
  */
+// 同步读取页缓存
 void force_page_cache_ra(struct readahead_control *ractl,
 		unsigned long nr_to_read)
 {
@@ -300,10 +306,11 @@ void force_page_cache_ra(struct readahead_control *ractl,
 	 * be up to the optimal hardware IO size
 	 */
 	index = readahead_index(ractl);
-	max_pages = max_t(unsigned long, bdi->io_pages, ra->ra_pages);
-	nr_to_read = min_t(unsigned long, nr_to_read, max_pages);
+	max_pages = max_t(unsigned long, bdi->io_pages, ra->ra_pages); // io_pages和 ra_pages 选大的
+	nr_to_read = min_t(unsigned long, nr_to_read, max_pages);  //
+    // 将一次读拆分成多个chunk去读取
 	while (nr_to_read) {
-		unsigned long this_chunk = (2 * 1024 * 1024) / PAGE_SIZE;
+		unsigned long this_chunk = (2 * 1024 * 1024) / PAGE_SIZE;  // 单词最大读2M 一个chunk
 
 		if (this_chunk > nr_to_read)
 			this_chunk = nr_to_read;
@@ -339,6 +346,12 @@ static unsigned long get_init_ra_size(unsigned long size, unsigned long max)
  *  Get the previous window size, ramp it up, and
  *  return it as the new window size.
  */
+// 预读页面数量由get_next_ra_size计算得到, 一般是4倍或者 2 倍， 用于设置ra->size
+/*既然是顺序读，就扩大预读窗口：
+  如果当前预读窗口大小ra->size < 1/16 * 允许读的最多page数
+  1）则预读窗口在原基础上扩大4倍。否则扩大2倍。
+  2）扩大后的窗口大小，不能超过“允许读的最多page数量”
+*/
 static unsigned long get_next_ra_size(struct file_ra_state *ra,
 				      unsigned long max)
 {
@@ -445,6 +458,8 @@ static int try_context_readahead(struct address_space *mapping,
 /*
  * A minimal readahead algorithm for trivial sequential/random reads.
  */
+//   如果是顺序读，ondemand_readahead读取至少req_size个page。
+//   如果是随机读，ondemand_readahead仅读取req_szie个page。
 static void ondemand_readahead(struct readahead_control *ractl,
 		bool hit_readahead_marker, unsigned long req_size)
 {
@@ -459,8 +474,9 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	 * If the request exceeds the readahead window, allow the read to
 	 * be up to the optimal hardware IO size
 	 */
+     /* read请求的page大于预读窗口大小，预读的page数量上调至存储器件单次io最大的page数量 */
 	if (req_size > max_pages && bdi->io_pages > max_pages)
-		max_pages = min(req_size, bdi->io_pages);
+		max_pages = min(req_size, bdi->io_pages); // io_pages和 ra_pages 选大的
 
 	/*
 	 * start of file
@@ -472,8 +488,42 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	 * It's the expected callback index, assume sequential access.
 	 * Ramp up sizes, and push forward the readahead window.
 	 */
+    /*  条件1：offset == ra->start + ra->size - ra->async_size
+
+             /          同步建立的预读窗口            \
+            /                                        \
+           |------------------------------------------|
+           |  |  |  |  | ^ |  |  |  |  |  |  |  |  |  |
+           |-------------|----------------------------|
+                         |
+             ra->start + ra->size - ra->async_size
+             该page设置了PageReadahead
+
+           上图是同步预读建立的预读窗口，从第0个page到第ra->size - ra->async_size
+           个page，是read需要用的，后面的page是预留给下次read用的。
+           读到第ra->size - ra->async_size个pag，表明预读窗口已经开始使用，
+           需要启动异步预读，读入一批page建立一个新的预读窗口，为下下次read做准备。
+
+    条件2：offset == ra->start + ra->size
+
+              前一次     /          异步建立的预读窗口           \
+             预读窗口   /                                        \
+           ------------|------------------------------------------|
+              |  |  |  | ^ |  |  |  |  |  |  |  |  |  |  |  |  |  |
+          ---------------|----------------------------------------|
+                         |
+          ra->start + ra->size(前一次预读用完了，执行下一个预读窗口的第一个page)
+          该page设置了PageReadahead
+
+          异步预读建立的预读窗口中，第一个page标记为PageReadahead，访问到这个标记的
+          页面，表明新预读窗口已经开始使用，需要启动异步预读，读入一批page建立一个新的
+          预读窗口，为下下次read做准备。
+
+    满足这两个条件，可认为本次read预上一次read是顺序读类型 (见原理部分描述）。
+    这个条件是不准确的，但是代码实现简单高效。*/
 	if ((index == (ra->start + ra->size - ra->async_size) ||
 	     index == (ra->start + ra->size))) {
+        // 既然是顺序读，就扩大预读窗
 		ra->start += ra->size;
 		ra->size = get_next_ra_size(ra, max_pages);
 		ra->async_size = ra->size;
@@ -486,9 +536,14 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	 * Query the pagecache for async_size, which normally equals to
 	 * readahead size. Ramp it up and use it as the new readahead size.
 	 */
+    /* 多线程顺序读一个文件（interleaved read），破坏了file->ra_state，所以没法根据前面的条件
+        判断出是顺序读类型。如果是顺序读，最终一定会访问到预读窗口中的PageReadahead标记的page。
+        所以，反过来推，访问到PageReadahead标记的page，就认为是顺序读。当然这样的判断是不准确的，
+        但准确率高，代码简单。*/
 	if (hit_readahead_marker) {
 		pgoff_t start;
 
+        /* offset + 1开始，找到第一个不在page cache中的文件数据页，作为预读的开始 */
 		rcu_read_lock();
 		start = page_cache_next_miss(ractl->mapping, index + 1,
 				max_pages);
@@ -502,12 +557,17 @@ static void ondemand_readahead(struct readahead_control *ractl,
 		ra->size += req_size;
 		ra->size = get_next_ra_size(ra, max_pages);
 		ra->async_size = ra->size;
-		goto readit;
+		goto readit;  // 执行预读操作
 	}
 
-	/*
-	 * oversize read
-	 */
+    /* 上面的场景根据下面3个条件判断是否是顺序读：
+     1. offset == ra->start + ra->size - ra->async_size
+     2. offset == ra->start + ra->size
+     3. hit_readahead_marker */
+
+/*
+ * oversize read
+ */
 	if (req_size > max_pages)
 		goto initial_readahead;
 
@@ -516,6 +576,8 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	 * trivial case: (index - prev_index) == 1
 	 * unaligned reads: (index - prev_index) == 0
 	 */
+
+//   代码执行到这里，属于随机读场景
 	prev_index = (unsigned long long)ra->prev_pos >> PAGE_SHIFT;
 	if (index - prev_index <= 1UL)
 		goto initial_readahead;
@@ -532,10 +594,16 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	 * standalone, small random read
 	 * Read as is, and do not pollute the readahead state.
 	 */
+    // 这里是随机读取，只读取对应的数据， 不会预读
+    /* read请求req_size，__do_page_cache_readahead只读req_size个page。注意2点：
+      1）__do_page_cache_readahead-->read_pages条件io就返回了，不会等待page变成PageUptodate。
+       2）__do_page_cache_readahead不会更改 struct file_ra_state。
+    */
 	do_page_cache_ra(ractl, req_size, 0);
 	return;
 
 initial_readahead:
+    /* 第一次读文件，初始化预读窗口 */
 	ra->start = index;
 	ra->size = get_init_ra_size(req_size, max_pages);
 	ra->async_size = ra->size > req_size ? ra->size - req_size : ra->size;
@@ -547,6 +615,9 @@ readit:
 	 * the resulted next readahead window into the current one.
 	 * Take care of maximum IO pages as above.
 	 */
+    /* hit_readahead_marker预期建立了一个预读窗口A，待访问offset刚好是这个预读窗口的第一个page，
+        这说明访问A窗口，后面没有预留的预读窗口了，需建立下一个预读窗口B备用，既然A、B都还没预读，
+         就合并后一起预读。*/
 	if (index == ra->start && ra->size == ra->async_size) {
 		add_pages = get_next_ra_size(ra, max_pages);
 		if (ra->size + add_pages <= max_pages) {
@@ -559,6 +630,7 @@ readit:
 	}
 
 	ractl->_index = ra->start;
+    // 执行预读操作， 提交io后就返回，异步的， 不会等待page变成PageUptodate
 	do_page_cache_ra(ractl, ra->size, ra->async_size);
 }
 
@@ -591,11 +663,12 @@ void page_cache_sync_ra(struct readahead_control *ractl,
 }
 EXPORT_SYMBOL_GPL(page_cache_sync_ra);
 
+//异步读取页缓存
 void page_cache_async_ra(struct readahead_control *ractl,
 		struct page *page, unsigned long req_count)
 {
 	/* no read-ahead */
-	if (!ractl->ra->ra_pages)
+	if (!ractl->ra->ra_pages)  // 不能预读
 		return;
 
 	/*

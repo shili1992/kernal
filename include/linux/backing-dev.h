@@ -135,6 +135,7 @@ static inline bool writeback_in_progress(struct bdi_writeback *wb)
 	return test_bit(WB_writeback_running, &wb->state);
 }
 
+// 获取inode对应super_block 中 s_bdi
 static inline struct backing_dev_info *inode_to_bdi(struct inode *inode)
 {
 	struct super_block *sb;

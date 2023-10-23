@@ -352,7 +352,7 @@ struct fuse_file_lock {
 #define FUSE_AUTO_INVAL_DATA	(1 << 12)
 #define FUSE_DO_READDIRPLUS	(1 << 13)
 #define FUSE_READDIRPLUS_AUTO	(1 << 14)
-#define FUSE_ASYNC_DIO		(1 << 15)
+#define FUSE_ASYNC_DIO		(1 << 15)  // dio请求并行发送
 #define FUSE_WRITEBACK_CACHE	(1 << 16)
 #define FUSE_NO_OPEN_SUPPORT	(1 << 17)
 #define FUSE_PARALLEL_DIROPS    (1 << 18)
@@ -641,7 +641,7 @@ struct fuse_create_in {
 struct fuse_open_out {
 	uint64_t	fh;
 	uint32_t	open_flags;
-	uint32_t	passthrough_fh;
+	uint32_t	passthrough_fh; // 要passthrough文件的 fd
 };
 
 struct fuse_release_in {

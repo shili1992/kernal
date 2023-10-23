@@ -949,6 +949,7 @@ struct file *fget_many(unsigned int fd, unsigned int refs)
 	return __fget(fd, FMODE_PATH, refs);
 }
 
+// 根据fd 获取 file
 struct file *fget(unsigned int fd)
 {
 	return __fget(fd, FMODE_PATH, 1);

@@ -130,6 +130,7 @@ static inline void bdi_debug_unregister(struct backing_dev_info *bdi)
 }
 #endif
 
+// 修改 bdi/xxx:xxx/read_ahead_kb
 static ssize_t read_ahead_kb_store(struct device *dev,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
@@ -809,8 +810,8 @@ struct backing_dev_info *bdi_alloc(int node_id)
 		return NULL;
 	}
 	bdi->capabilities = BDI_CAP_WRITEBACK | BDI_CAP_WRITEBACK_ACCT;
-	bdi->ra_pages = VM_READAHEAD_PAGES;
-	bdi->io_pages = VM_READAHEAD_PAGES;
+	bdi->ra_pages = VM_READAHEAD_PAGES;  // 初始化为 32
+	bdi->io_pages = VM_READAHEAD_PAGES;  // 初始化为32
 	timer_setup(&bdi->laptop_mode_wb_timer, laptop_mode_timer_fn, 0);
 	return bdi;
 }

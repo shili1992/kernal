@@ -493,6 +493,7 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	return ret;
 }
 
+// 调用对应的写入函数
 static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
 {
 	struct iovec iov = { .iov_base = (void __user *)buf, .iov_len = len };
@@ -502,9 +503,9 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t 
 
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = (ppos ? *ppos : 0);
-	iov_iter_init(&iter, WRITE, &iov, 1, len);
+	iov_iter_init(&iter, WRITE, &iov, 1, len);  // 将用户空间数据 初始化为 iter
 
-	ret = call_write_iter(filp, &kiocb, &iter);
+	ret = call_write_iter(filp, &kiocb, &iter); // 调用对应的写入函数
 	BUG_ON(ret == -EIOCBQUEUED);
 	if (ret > 0 && ppos)
 		*ppos = kiocb.ki_pos;
@@ -633,9 +634,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	return ksys_read(fd, buf, count);
 }
 
+// 对应write api
 ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 {
-	struct fd f = fdget_pos(fd);
+	struct fd f = fdget_pos(fd); // 通过fd 找到 fd对应的file信息
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
@@ -711,6 +713,7 @@ SYSCALL_DEFINE4(pwrite64, unsigned int, fd, const char __user *, buf,
 	return ksys_pwrite64(fd, buf, count, pos);
 }
 
+// 调用 filp->f_op->read_iter,  调用 filp->f_op->write_iter 进行数据读写
 static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
 		loff_t *ppos, int type, rwf_t flags)
 {
@@ -724,7 +727,7 @@ static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
 	kiocb.ki_pos = (ppos ? *ppos : 0);
 
 	if (type == READ)
-		ret = call_read_iter(filp, &kiocb, iter);
+		ret = call_read_iter(filp, &kiocb, iter);   // 调用 filp->f_op->read_iter(
 	else
 		ret = call_write_iter(filp, &kiocb, iter);
 	BUG_ON(ret == -EIOCBQUEUED);
@@ -768,6 +771,7 @@ static ssize_t do_loop_readv_writev(struct file *filp, struct iov_iter *iter,
 	return ret;
 }
 
+// 调用调用 filp->f_op->read_iter 或者filp->f_op->read  进行读取数据
 static ssize_t do_iter_read(struct file *file, struct iov_iter *iter,
 		loff_t *pos, rwf_t flags)
 {
@@ -787,8 +791,10 @@ static ssize_t do_iter_read(struct file *file, struct iov_iter *iter,
 		return ret;
 
 	if (file->f_op->read_iter)
+        // 调用 filp->f_op->read_iter
 		ret = do_iter_readv_writev(file, iter, pos, READ, flags);
 	else
+        // 多次调用 filp->f_op->read
 		ret = do_loop_readv_writev(file, iter, pos, READ, flags);
 out:
 	if (ret >= 0)
@@ -824,11 +830,13 @@ out:
 }
 EXPORT_SYMBOL(vfs_iocb_iter_read);
 
+// 调用调用 filp->f_op->read_iter 或者filp->f_op->read  进行读取数据
 ssize_t vfs_iter_read(struct file *file, struct iov_iter *iter, loff_t *ppos,
 		rwf_t flags)
 {
 	if (!file->f_op->read_iter)
 		return -EINVAL;
+    // 调用调用 filp->f_op->read_iter 或者filp->f_op->read  进行读取数据
 	return do_iter_read(file, iter, ppos, flags);
 }
 EXPORT_SYMBOL(vfs_iter_read);

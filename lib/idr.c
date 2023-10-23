@@ -76,6 +76,7 @@ EXPORT_SYMBOL_GPL(idr_alloc_u32);
  * Return: The newly allocated ID, -ENOMEM if memory allocation failed,
  * or -ENOSPC if no free IDs could be found.
  */
+ // 返回  The newly allocated ID,
 int idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp)
 {
 	u32 id = start;
@@ -149,6 +150,7 @@ EXPORT_SYMBOL(idr_alloc_cyclic);
  *
  * Return: The pointer formerly associated with this ID.
  */
+ // The pointer formerly associated with this ID.
 void *idr_remove(struct idr *idr, unsigned long id)
 {
 	return radix_tree_delete_item(&idr->idr_rt, id - idr->idr_base, NULL);

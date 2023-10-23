@@ -53,8 +53,10 @@ static void fuse_request_init(struct fuse_mount *fm, struct fuse_req *req)
 
 static struct fuse_req *fuse_request_alloc(struct fuse_mount *fm, gfp_t flags)
 {
+    // 从内存缓存申请内存，并初始化
 	struct fuse_req *req = kmem_cache_zalloc(fuse_req_cachep, flags);
 	if (req)
+        // 初始化请求
 		fuse_request_init(fm, req);
 
 	return req;
@@ -85,6 +87,7 @@ void fuse_set_initialized(struct fuse_conn *fc)
 
 static bool fuse_block_alloc(struct fuse_conn *fc, bool for_background)
 {
+    // fc阻塞有2种情况：1.fc还没初始化完成；2.后台请求数量太大，已阻塞
 	return !fc->initialized || (for_background && fc->blocked);
 }
 
@@ -104,6 +107,8 @@ static void fuse_drop_waiting(struct fuse_conn *fc)
 
 static void fuse_put_request(struct fuse_req *req);
 
+// 通过__fuse_get_req方法来调用__fuse_request_alloc从内核高速缓存kmem_cache中分配一个fuse_req实例，
+// 不同点是如果是background机制，则fuse_req对象成员初始值会有些不同，比如在flag中标记FR_BACKGROUND bit。
 static struct fuse_req *fuse_get_req(struct fuse_mount *fm, bool for_background)
 {
 	struct fuse_conn *fc = fm->fc;
@@ -111,8 +116,10 @@ static struct fuse_req *fuse_get_req(struct fuse_mount *fm, bool for_background)
 	int err;
 	atomic_inc(&fc->num_waiting);
 
+    // 判断fc是否已经阻塞
 	if (fuse_block_alloc(fc, for_background)) {
 		err = -EINTR;
+        // 如果fc已经阻塞，则等待其变成不阻塞
 		if (wait_event_killable_exclusive(fc->blocked_waitq,
 				!fuse_block_alloc(fc, for_background)))
 			goto out;
@@ -128,10 +135,12 @@ static struct fuse_req *fuse_get_req(struct fuse_mount *fm, bool for_background)
 	if (fc->conn_error)
 		goto out;
 
+    // 从fuse_req_cachep内存缓存里申请一个对象，并初始化
 	req = fuse_request_alloc(fm, GFP_KERNEL);
 	err = -ENOMEM;
 	if (!req) {
 		if (for_background)
+            // 如果申请失败，则唤醒blocked_waitq等待队列
 			wake_up(&fc->blocked_waitq);
 		goto out;
 	}
@@ -161,6 +170,7 @@ static void fuse_put_request(struct fuse_req *req)
 	struct fuse_conn *fc = req->fm->fc;
 
 	if (refcount_dec_and_test(&req->count)) {
+        // 如果是后台请求，则唤醒blocked_waitq
 		if (test_bit(FR_BACKGROUND, &req->flags)) {
 			/*
 			 * We get here in the unlikely case that a background
@@ -172,6 +182,7 @@ static void fuse_put_request(struct fuse_req *req)
 			spin_unlock(&fc->bg_lock);
 		}
 
+        // 如果是等待请求，则清除标志
 		if (test_bit(FR_WAITING, &req->flags)) {
 			__clear_bit(FR_WAITING, &req->flags);
 			fuse_drop_waiting(fc);
@@ -208,13 +219,16 @@ static unsigned int fuse_req_hash(u64 unique)
 /**
  * A new request is available, wake fiq->waitq
  */
+//直接唤醒waitq, 发送poll_in信号就完了
 static void fuse_dev_wake_and_unlock(struct fuse_iqueue *fiq, bool sync)
 __releases(fiq->lock)
 {
+    // 唤醒waitq等待队列
 	if (sync)
 		wake_up_sync(&fiq->waitq);
 	else
 		wake_up(&fiq->waitq);
+    // 如果有fasync，则向他发送POLL_IN信号
 	kill_fasync(&fiq->fasync, SIGIO, POLL_IN);
 	spin_unlock(&fiq->lock);
 }
@@ -226,14 +240,17 @@ const struct fuse_iqueue_ops fuse_dev_fiq_ops = {
 };
 EXPORT_SYMBOL_GPL(fuse_dev_fiq_ops);
 
+// 最终放入到 pending 队列
 static void queue_request_and_unlock(struct fuse_iqueue *fiq,
 				     struct fuse_req *req, bool sync)
 __releases(fiq->lock)
 {
+    // 入参总长度=入参头+每个参数的长度
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		fuse_len_args(req->args->in_numargs,
 			      (struct fuse_arg *) req->args->in_args);
-	list_add_tail(&req->list, &fiq->pending);
+	list_add_tail(&req->list, &fiq->pending);  // 最终放入到 pending 队列
+    // fiq的ops默认是fuse_dev_fiq_ops
 	fiq->ops->wake_pending_and_unlock(fiq, sync);
 }
 
@@ -261,10 +278,13 @@ void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
 	}
 }
 
+// 将 bg_queue 中的req 都 添加到 pending队列中， 但是最多只能是max_background个
+// 如果已经有max_background 在 pending队列中了，则剩余的req 还是在 bg_queue 队列中
 static void flush_bg_queue(struct fuse_conn *fc)
 {
 	struct fuse_iqueue *fiq = &fc->iq;
 
+    // 将 bg_queue 中的req 都 添加到 pending队列中， 但是最多只能是max_background个
 	while (fc->active_background < fc->max_background &&
 	       !list_empty(&fc->bg_queue)) {
 		struct fuse_req *req;
@@ -274,7 +294,7 @@ static void flush_bg_queue(struct fuse_conn *fc)
 		fc->active_background++;
 		spin_lock(&fiq->lock);
 		req->in.h.unique = fuse_get_unique(fiq);
-		queue_request_and_unlock(fiq, req, false);
+		queue_request_and_unlock(fiq, req, false); // 放入到 pending 队列
 	}
 }
 
@@ -292,6 +312,7 @@ void fuse_request_end(struct fuse_req *req)
 	struct fuse_conn *fc = fm->fc;
 	struct fuse_iqueue *fiq = &fc->iq;
 
+    // 如果请求已经完成，直接释放
 	if (test_and_set_bit(FR_FINISHED, &req->flags))
 		goto put_request;
 
@@ -300,6 +321,7 @@ void fuse_request_end(struct fuse_req *req)
 	 * changing and below FR_INTERRUPTED check. Pairs with
 	 * smp_mb() from queue_interrupt().
 	 */
+    // 中断请求，直接删除
 	if (test_bit(FR_INTERRUPTED, &req->flags)) {
 		spin_lock(&fiq->lock);
 		list_del_init(&req->intr_entry);
@@ -311,6 +333,7 @@ void fuse_request_end(struct fuse_req *req)
 		spin_lock(&fc->bg_lock);
 		clear_bit(FR_BACKGROUND, &req->flags);
 		if (fc->num_background == fc->max_background) {
+            // 之前是阻塞的， 现在有个释放出来了， 如果已经阻塞了，则清除阻塞状态，并唤醒blocked_waitq
 			fc->blocked = 0;
 			wake_up(&fc->blocked_waitq);
 		} else if (!fc->blocked) {
@@ -320,26 +343,31 @@ void fuse_request_end(struct fuse_req *req)
 			 * fc->blocked with waiters with the wake_up() call
 			 * above.
 			 */
+            // 这个等待队列不为空时，唤醒blocked_waitq
 			if (waitqueue_active(&fc->blocked_waitq))
 				wake_up(&fc->blocked_waitq);
 		}
-
+        // 如果后台请求数量已经到了阻塞阈值，则清除相应状态
 		if (fc->num_background == fc->congestion_threshold && fm->sb) {
 			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
 			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
 		fc->num_background--;
 		fc->active_background--;
+        // 取出一个请求执行
 		flush_bg_queue(fc);
 		spin_unlock(&fc->bg_lock);
 	} else {
 		/* Wake up waiter sleeping in request_wait_answer() */
+        // 不是后台请求就简单的唤醒waitq
 		wake_up(&req->waitq);
 	}
 
+    // 如果是异步请求，则调用它的end回调
 	if (test_bit(FR_ASYNC, &req->flags))
 		req->args->end(fm, req->args, req->out.h.error);
 put_request:
+    // 释放请求
 	fuse_put_request(req);
 }
 EXPORT_SYMBOL_GPL(fuse_request_end);
@@ -430,13 +458,15 @@ static void __fuse_request_send(struct fuse_req *req)
 		spin_unlock(&fiq->lock);
 		req->out.h.error = -ENOTCONN;
 	} else {
+        // 获取一个请求序号
 		req->in.h.unique = fuse_get_unique(fiq);
 		/* acquire extra reference, since request is still needed
 		   after fuse_request_end() */
-		__fuse_get_request(req);
+		__fuse_get_request(req);  // 增加引用计数
+        // 加入pending表尾
 		queue_request_and_unlock(fiq, req, true);
 
-		request_wait_answer(req);
+		request_wait_answer(req);  // 阻塞住知道 daemon 执行完req 并发送 rsp
 		/* Pairs with smp_wmb() in fuse_request_end() */
 		smp_rmb();
 	}
@@ -494,6 +524,11 @@ static void fuse_args_to_req(struct fuse_req *req, struct fuse_args *args)
 		__set_bit(FR_ASYNC, &req->flags);
 }
 
+// 与用户态的fuse daemon 进程交互，通过异步方式发送操作请求，并阻塞等待操作响应
+//fuse_simple_request中的异步获取路径信息。经过几层调用，
+// 最终调用<fs/fuse/dev.c>中的__fuse_request_send函数来向用户态进程发送查询请求和接收响应。
+// 首先使用queue_request函数将请求加入fuse_iqueue请求队列中，
+// 然后使用request_wait_answer函数等待用户态文件系统进程的响应。
 ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 {
 	struct fuse_conn *fc = fm->fc;
@@ -533,6 +568,9 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 	return ret;
 }
 
+/// 将req添加到bg_queue，
+/// 然后将 bg_queue 中的req 都 添加到 pending队列中， 但是最多只能是max_background个
+//// 如果已经有max_background 在 pending队列中了，则剩余的req 还是在 bg_queue 队列中
 static bool fuse_request_queue_background(struct fuse_req *req)
 {
 	struct fuse_mount *fm = req->fm;
@@ -548,14 +586,16 @@ static bool fuse_request_queue_background(struct fuse_req *req)
 	spin_lock(&fc->bg_lock);
 	if (likely(fc->connected)) {
 		fc->num_background++;
-		if (fc->num_background == fc->max_background)
+        // 如果后台任务数量已经到了最大值，则设置fc的阻塞标志
+		if (fc->num_background == fc->max_background) // 使用的background 已经达到最大
 			fc->blocked = 1;
+        // 如果已经到了阻塞的阈值，则设置同步，异步都阻塞
 		if (fc->num_background == fc->congestion_threshold && fm->sb) {
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
-		list_add_tail(&req->list, &fc->bg_queue);
-		flush_bg_queue(fc);
+		list_add_tail(&req->list, &fc->bg_queue);// 最终放入到 bg_queue 队列
+		flush_bg_queue(fc);  // 将 bg_queue 中的req 都 添加到 pending队列中， 但是最多只能是max_background个
 		queued = true;
 	}
 	spin_unlock(&fc->bg_lock);
@@ -563,26 +603,32 @@ static bool fuse_request_queue_background(struct fuse_req *req)
 	return queued;
 }
 
+//生成新的 fuse_req, 并进行设置， req添加到bg_queue，
+// 然后尝试将 bg_queue 中的req 都 添加到 pending队列中
 int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 			    gfp_t gfp_flags)
 {
 	struct fuse_req *req;
 
 	if (args->force) {
+        // 强制请求必须有creds?
 		WARN_ON(!args->nocreds);
+
+        // 从fuse_req_cachep内存缓存里申请一个对象，并初始化
 		req = fuse_request_alloc(fm, gfp_flags);
 		if (!req)
 			return -ENOMEM;
 		__set_bit(FR_BACKGROUND, &req->flags);
 	} else {
 		WARN_ON(args->nocreds);
-		req = fuse_get_req(fm, true);
+		req = fuse_get_req(fm, true); // 获取fuse_req 实例
 		if (IS_ERR(req))
 			return PTR_ERR(req);
 	}
 
 	fuse_args_to_req(req, args);
 
+    //将req添加到bg_queue， 然后尝试将 bg_queue 中的req 都 添加到 pending队列中
 	if (!fuse_request_queue_background(req)) {
 		fuse_put_request(req);
 		return -ENOTCONN;
@@ -658,16 +704,16 @@ static int unlock_request(struct fuse_req *req)
 }
 
 struct fuse_copy_state {
-	int write;
-	struct fuse_req *req;
-	struct iov_iter *iter;
+	int write; // 是否写入
+	struct fuse_req *req;  // 请求
+	struct iov_iter *iter;  // 游标
 	struct pipe_buffer *pipebufs;
 	struct pipe_buffer *currbuf;
 	struct pipe_inode_info *pipe;
 	unsigned long nr_segs;
 	struct page *pg;
 	unsigned len;
-	unsigned offset;
+	unsigned offset; // 页偏移
 	unsigned move_pages:1;
 };
 
@@ -1015,11 +1061,13 @@ static int fuse_copy_pages(struct fuse_copy_state *cs, unsigned nbytes,
 static int fuse_copy_one(struct fuse_copy_state *cs, void *val, unsigned size)
 {
 	while (size) {
+        // 如果cs里没空间了，先准备空间
 		if (!cs->len) {
 			int err = fuse_copy_fill(cs);
 			if (err)
 				return err;
 		}
+        // 给cs里复制数据
 		fuse_copy_do(cs, &val, &size);
 	}
 	return 0;
@@ -1217,6 +1265,9 @@ __releases(fiq->lock)
  * fuse_request_end().  Otherwise add it to the processing list, and set
  * the 'sent' flag.
  */
+// fuse_dev_do_read是从fuse_conn的fuse_iqueue中取出一个request，放入到fuse_dev的fuse_pqueue中的io list里；
+// 然后执行内存拷贝，将内核buffer中的req数据拷贝到用户空间，
+// copy完成后将这个req再从fuse_pqueue的io list移动到processing list
 static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 				struct fuse_copy_state *cs, size_t nbytes)
 {
@@ -1248,14 +1299,18 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		return -EINVAL;
 
  restart:
-	for (;;) {
+	for (;;) {  // 检查 pending队列中是否有request
 		spin_lock(&fiq->lock);
+        // request_pending 是检查fiq的pending,interrupts,
+        // forget_list_head这三个表不为空，如果这三个表不空，说明
+        // 有请求需要处理
 		if (!fiq->connected || request_pending(fiq))
 			break;
 		spin_unlock(&fiq->lock);
 
 		if (file->f_flags & O_NONBLOCK)
 			return -EAGAIN;
+        // 在waitq队列上等待
 		err = wait_event_interruptible_exclusive(fiq->waitq,
 				!fiq->connected || request_pending(fiq));
 		if (err)
@@ -1266,13 +1321,13 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		err = fc->aborted ? -ECONNABORTED : -ENODEV;
 		goto err_unlock;
 	}
-
+    // interrupts 请求第一优先级, 中断列表不为空，则给用户层读一个中断请求
 	if (!list_empty(&fiq->interrupts)) {
 		req = list_entry(fiq->interrupts.next, struct fuse_req,
 				 intr_entry);
 		return fuse_read_interrupt(fiq, cs, nbytes, req);
 	}
-
+    // 处理forget请求
 	if (forget_pending(fiq)) {
 		if (list_empty(&fiq->pending) || fiq->forget_batch-- > 0)
 			return fuse_read_forget(fc, fiq, cs, nbytes);
@@ -1281,6 +1336,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 			fiq->forget_batch = 16;
 	}
 
+    // 从 pending队列中取出请求, 	这里就是一般的请求，从pending列表取下一个请求
 	req = list_entry(fiq->pending.next, struct fuse_req, list);
 	clear_bit(FR_PENDING, &req->flags);
 	list_del_init(&req->list);
@@ -1308,11 +1364,14 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		goto out_end;
 
 	}
+    // 把请求挂到fpq的io列表上
 	list_add(&req->list, &fpq->io);
 	spin_unlock(&fpq->lock);
 	cs->req = req;
+    // 复制请求头
 	err = fuse_copy_one(cs, &req->in.h, sizeof(req->in.h));
 	if (!err)
+        // 复制入参
 		err = fuse_copy_args(cs, args->in_numargs, args->in_pages,
 				     (struct fuse_arg *) args->in_args, 0);
 	fuse_copy_finish(cs);
@@ -1331,14 +1390,17 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		goto out_end;
 	}
 	hash = fuse_req_hash(req->in.h.unique);
+    // 将request 移动至 processing队列
 	list_move_tail(&req->list, &fpq->processing[hash]);
+    // 增加请求的引用计数
 	__fuse_get_request(req);
-	set_bit(FR_SENT, &req->flags);
+	set_bit(FR_SENT, &req->flags); // req->flags会保存当前请求的状态。
 	spin_unlock(&fpq->lock);
 	/* matches barrier in request_wait_answer() */
 	smp_mb__after_atomic();
 	if (test_bit(FR_INTERRUPTED, &req->flags))
 		queue_interrupt(req);
+    // 释放请求
 	fuse_put_request(req);
 
 	return reqsize;
@@ -1863,6 +1925,8 @@ static int copy_out_args(struct fuse_copy_state *cs, struct fuse_args *args,
  * it from the list and copy the rest of the buffer to the request.
  * The request is finished by calling fuse_request_end().
  */
+// 当fuse daemon处理完请求后，会将结果写回到/dev/fuse。写数据保存在struct  fuse_copy_state中，
+// 并且会根据unique id在fc(fuse_conn)中找到对应的req，并将写回的参数从fuse_copy_state拷贝至req->out
 static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 				 struct fuse_copy_state *cs, size_t nbytes)
 {
@@ -1875,7 +1939,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	err = -EINVAL;
 	if (nbytes < sizeof(struct fuse_out_header))
 		goto out;
-
+    // 将用户空间写数据 从cs拷贝 oh(fuse_out_header)
 	err = fuse_copy_one(cs, &oh, sizeof(oh));
 	if (err)
 		goto copy_finish;
@@ -1900,6 +1964,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	spin_lock(&fpq->lock);
 	req = NULL;
 	if (fpq->connected)
+        // 更具unique 在fuse_conn中找到对应得req
 		req = request_find(fpq, oh.unique & ~FUSE_INT_REQ_BIT);
 
 	err = -ENOENT;
@@ -1938,6 +2003,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	if (oh.error)
 		err = nbytes != sizeof(oh) ? -EINVAL : 0;
 	else
+        // 从cs(包含写数据)中拷贝参数到 req->out
 		err = copy_out_args(cs, req->args, nbytes);
 	fuse_copy_finish(cs);
 
@@ -2337,6 +2403,7 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 	return res;
 }
 
+// fuse注册到 vfs的接口函数
 const struct file_operations fuse_dev_operations = {
 	.owner		= THIS_MODULE,
 	.open		= fuse_dev_open,
