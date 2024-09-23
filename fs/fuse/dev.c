@@ -254,6 +254,7 @@ __releases(fiq->lock)
 	fiq->ops->wake_pending_and_unlock(fiq, sync);
 }
 
+// 往forget队列中添加 一个 forget
 void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
 		       u64 nodeid, u64 nlookup)
 {
@@ -1163,6 +1164,7 @@ struct fuse_forget_link *fuse_dequeue_forget(struct fuse_iqueue *fiq,
 }
 EXPORT_SYMBOL(fuse_dequeue_forget);
 
+// daemon 从forget 队列中读取 一个forget请求
 static int fuse_read_single_forget(struct fuse_iqueue *fiq,
 				   struct fuse_copy_state *cs,
 				   size_t nbytes)
@@ -1245,6 +1247,7 @@ __releases(fiq->lock)
 	return ih.len;
 }
 
+// daemon 从forget 队列中读取 一个forget请求
 static int fuse_read_forget(struct fuse_conn *fc, struct fuse_iqueue *fiq,
 			    struct fuse_copy_state *cs,
 			    size_t nbytes)
@@ -1327,11 +1330,13 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 				 intr_entry);
 		return fuse_read_interrupt(fiq, cs, nbytes, req);
 	}
-    // 处理forget请求
+    // 处理forget请求， 从forget 队列中读取 一个forget请求
+    //  16个forget 请求， 8个 pending请求 交替执行
 	if (forget_pending(fiq)) {
 		if (list_empty(&fiq->pending) || fiq->forget_batch-- > 0)
 			return fuse_read_forget(fc, fiq, cs, nbytes);
 
+        //  16个forget 请求， 8个 pending请求 交替执行
 		if (fiq->forget_batch <= -8)
 			fiq->forget_batch = 16;
 	}

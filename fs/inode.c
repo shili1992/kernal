@@ -302,6 +302,7 @@ static void destroy_inode(struct inode *inode)
  * write when the file is truncated and actually unlinked
  * on the filesystem.
  */
+ // 只是减少引用件数， 没有真正删除。
 void drop_nlink(struct inode *inode)
 {
 	WARN_ON(inode->i_nlink == 0);
@@ -563,6 +564,7 @@ EXPORT_SYMBOL_NS(clear_inode, ANDROID_GKI_VFS_EXPORT_ONLY);
  * the cache. This should occur atomically with setting the I_FREEING state
  * flag, so no inodes here should ever be on the LRU when being evicted.
  */
+// 删除 inode
 static void evict(struct inode *inode)
 {
 	const struct super_operations *op = inode->i_sb->s_op;
@@ -570,10 +572,11 @@ static void evict(struct inode *inode)
 	BUG_ON(!(inode->i_state & I_FREEING));
 	BUG_ON(!list_empty(&inode->i_lru));
 
+  //从bdi_writeback的b_io链表摘除
 	if (!list_empty(&inode->i_io_list))
 		inode_io_list_del(inode);
 
-	inode_sb_list_del(inode);
+	inode_sb_list_del(inode); 	//将inode从超级块的s_inodes链表摘除
 
 	/*
 	 * Wait for flusher thread to be done with the inode so that filesystem
@@ -581,10 +584,11 @@ static void evict(struct inode *inode)
 	 * the inode has I_FREEING set, flusher thread won't start new work on
 	 * the inode.  We just have to wait for running writeback to finish.
 	 */
-	inode_wait_for_writeback(inode);
+	inode_wait_for_writeback(inode); // //等待该inode回写完毕
 
+  // 调用对应文件系统的evict_inode方法，回写pagecache
 	if (op->evict_inode) {
-		op->evict_inode(inode);
+		op->evict_inode(inode);   // 调用注册 的evict_inode方法
 	} else {
 		truncate_inode_pages_final(&inode->i_data);
 		clear_inode(inode);
@@ -592,6 +596,7 @@ static void evict(struct inode *inode)
 	if (S_ISCHR(inode->i_mode) && inode->i_cdev)
 		cd_forget(inode);
 
+  //从全局inode哈希表中摘除
 	remove_inode_hash(inode);
 
 	spin_lock(&inode->i_lock);
@@ -609,14 +614,17 @@ static void evict(struct inode *inode)
  * Dispose-list gets a local list with local inodes in it, so it doesn't
  * need to worry about list corruption and SMP locks.
  */
+// 将超级块的s_inode_lru链表中的inode进行回收
 static void dispose_list(struct list_head *head)
 {
 	while (!list_empty(head)) {
 		struct inode *inode;
 
+      //将inode从超级块的s_inode_lru链表摘除
 		inode = list_first_entry(head, struct inode, i_lru);
 		list_del_init(&inode->i_lru);
 
+      //回收inode
 		evict(inode);
 		cond_resched();
 	}
@@ -805,13 +813,19 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
  * to trim from the LRU. Inodes to be freed are moved to a temporary list and
  * then are freed outside inode_lock by dispose_list().
  */
+//指定的超级块（superblock）对应的inode缓存进行清理。这个函数尝试去移除那些已经不再被使用（即引用计数为0）
+// 并且是干净（不含未写回磁盘的数据）的inode对象。其目的是为了回收内存资源或减少系统的内存使用。
 long prune_icache_sb(struct super_block *sb, struct shrink_control *sc)
 {
 	LIST_HEAD(freeable);
 	long freed;
 
+  //遍历超级块的s_inode_lru链表，按照回收控制结构sc指定的回收数量，
+  //将可回收的inode隔离到freeable链表中集中回收
 	freed = list_lru_shrink_walk(&sb->s_inode_lru, sc,
 				     inode_lru_isolate, &freeable);
+
+  //将隔离出来的inode进行回收，这样隔离后可以避免锁竞争
 	dispose_list(&freeable);
 	return freed;
 }
@@ -1620,6 +1634,7 @@ EXPORT_SYMBOL(generic_delete_inode);
  * in cache if fs is alive, sync and evict if fs is
  * shutting down.
  */
+// 确保一定会删除inode
 static void iput_final(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
@@ -1630,9 +1645,9 @@ static void iput_final(struct inode *inode)
 	WARN_ON(inode->i_state & I_NEW);
 
 	if (op->drop_inode)
-		drop = op->drop_inode(inode);
+		drop = op->drop_inode(inode);  // 通过注册的函数判断 是否删除， 默认返回1， 删除
 	else
-		drop = generic_drop_inode(inode);
+		drop = generic_drop_inode(inode);  //通过inode->i_nlink硬链接计数的值来判断inode是否可以被删除
 
 	if (!drop &&
 	    !(inode->i_state & I_DONTCACHE) &&
@@ -1657,10 +1672,10 @@ static void iput_final(struct inode *inode)
 
 	WRITE_ONCE(inode->i_state, state | I_FREEING);
 	if (!list_empty(&inode->i_lru))
-		inode_lru_list_del(inode);
+		inode_lru_list_del(inode); // 将inode从LRU链表中删除
 	spin_unlock(&inode->i_lock);
 
-	evict(inode);
+	evict(inode);// 删除 inode
 }
 
 /**
@@ -1678,15 +1693,19 @@ void iput(struct inode *inode)
 		return;
 	BUG_ON(inode->i_state & I_CLEAR);
 retry:
+  // 减少引用计数， 如果减少后 引用计数为0， 那么调用 iput_final
+  // 如果inode的引用计数确实减至0并成功获取到锁，则调用iput_final以执行最终释放和清理操作。
+  // 这通常涉及到从相应的数据结构中移除inode，释放分配的资源等。
 	if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock)) {
-		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {
-			atomic_inc(&inode->i_count);
-			spin_unlock(&inode->i_lock);
-			trace_writeback_lazytime_iput(inode);
-			mark_inode_dirty_sync(inode);
-			goto retry;
+      // 如果inode链接计数不为零(i_nlink > 0)，并且inode状态标识中有DIRTY_TIME标志，表明inode需要更新时间戳。
+		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {  // 重试分支，最终还是执行到iput_final
+			atomic_inc(&inode->i_count);  // 重新增加引用计数
+			spin_unlock(&inode->i_lock);   // 解锁inode
+			trace_writeback_lazytime_iput(inode);  // 追踪lazytime写回相关事件
+			mark_inode_dirty_sync(inode);  // 标记inode为脏，并同步到磁盘
+			goto retry; //时间戳更新后，再次尝试释放inode
 		}
-		iput_final(inode);
+		iput_final(inode); // 执行最终的inode释放操作
 	}
 }
 EXPORT_SYMBOL(iput);

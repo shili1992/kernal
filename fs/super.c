@@ -58,6 +58,9 @@ static char *sb_writers_name[SB_FREEZE_LEVELS] = {
  * shrinker path and that leads to deadlock on the shrinker_rwsem. Hence we
  * take a passive reference to the superblock to avoid this from occurring.
  */
+// 每个超级块都会注册一个shrink函数，当内存不足时用于回收内存，主要就是回收未使用的dentry和inode缓存
+// vfs_cache_pressure通过控制缓存回收时扫描和回收的数量来达到释放缓存的多少，系统默认值是100，
+// 也就是默认释放当前系统所有缓存，当值大于100时，也就是要回收多余当前系统缓存量，这样就需要持续一段时间，一边等待系统生成缓存，一边再回收，直到达到指定值。
 static unsigned long super_cache_scan(struct shrinker *shrink,
 				      struct shrink_control *sc)
 {
@@ -102,8 +105,10 @@ static unsigned long super_cache_scan(struct shrinker *shrink,
 	 * accounting uses this to fully empty the caches.
 	 */
 	sc->nr_to_scan = dentries + 1;
+  //先回收dentry缓存，扫描该超级块上的s_dentry_lru链表
 	freed = prune_dcache_sb(sb, sc);
 	sc->nr_to_scan = inodes + 1;
+  //再回收inode缓存，扫描该超级块上的s_inode_lru链表
 	freed += prune_icache_sb(sb, sc);
 
 	if (fs_objects) {

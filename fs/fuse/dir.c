@@ -47,12 +47,14 @@ static inline void __fuse_dentry_settime(struct dentry *dentry, u64 time)
 	((struct fuse_dentry *) dentry->d_fsdata)->time = time;
 }
 
+// 获取dentry  删除的时间
 static inline u64 fuse_dentry_time(const struct dentry *entry)
 {
 	return ((struct fuse_dentry *) entry->d_fsdata)->time;
 }
 #endif
 
+// 设置 dentry  删除的时间
 static void fuse_dentry_settime(struct dentry *dentry, u64 time)
 {
 	struct fuse_conn *fc = get_fuse_conn_super(dentry->d_sb);
@@ -90,8 +92,10 @@ void fuse_init_dentry_root(struct dentry *root, struct file *backing_dir)
  * Set dentry and possibly attribute timeouts from the lookup/mk*
  * replies
  */
+// 设置
 void fuse_change_entry_timeout(struct dentry *entry, struct fuse_entry_out *o)
 {
+  // 设置  dentry 删除 时间
 	fuse_dentry_settime(entry,
 		time_to_jiffies(o->entry_valid, o->entry_valid_nsec));
 }
@@ -110,6 +114,7 @@ static void fuse_invalidate_attr_mask(struct inode *inode, u32 mask)
  * Mark the attributes as stale, so that at the next call to
  * ->getattr() they will be fetched from userspace
  */
+// 设置 attr 失效
 void fuse_invalidate_attr(struct inode *inode)
 {
 	fuse_invalidate_attr_mask(inode, STATX_BASIC_STATS);
@@ -154,6 +159,7 @@ static void fuse_invalidate_entry(struct dentry *entry)
 	fuse_invalidate_entry_cache(entry);
 }
 
+// 初始化lookup请求
 static void fuse_lookup_init(struct fuse_conn *fc, struct fuse_args *args,
 			     u64 nodeid, const struct qstr *name,
 			     struct fuse_entry_out *outarg,
@@ -225,6 +231,10 @@ put_backing_file:
  * the lookup once more.  If the lookup results in the same inode,
  * then refresh the attributes, timeouts and mark the dentry valid.
  */
+// revalidate方法由具体的文件系统实现，会根据文件系统的特点来进行必要的检查。
+// 例如，对于网络文件系统，revalidate可能会向远程服务器发送请求来验证本地缓存的dentry是否仍然与服务器上的文件状态一致。
+// 如果revalidate方法确认dentry有效，内核继续利用这个dentry处理用户请求。
+//如果验证失败，dentry将会被标记为无效，内核可能需要重新从daemon lookup 加载文件的元数据。
 static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 {
 	struct inode *inode;
@@ -249,6 +259,8 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		}
 	}
 #endif
+    // 超过时间，  或者 rename等则 需要重新获取 lookup 获取数据
+    //  entry timeout 超时，导致需要重新向 host 发送一个 FUSE (LOOKUP) request
 	if (time_before64(fuse_dentry_time(entry), get_jiffies_64()) ||
 		 (flags & (LOOKUP_EXCL | LOOKUP_REVAL | LOOKUP_RENAME_TARGET))) {
 		struct fuse_entry_out outarg;
@@ -289,7 +301,7 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 
 		fuse_lookup_init(fm->fc, &args, get_node_id(d_inode(parent)),
 				 &entry->d_name, &outarg, &bpf_arg.out);
-		ret = fuse_simple_request(fm, &args);
+		ret = fuse_simple_request(fm, &args);   // 发送lookup 请求
 		dput(parent);
 
 		/* Zero nodeid is same as -ENOENT */
@@ -297,6 +309,8 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 			ret = -ENOENT;
 		if (!ret || ret == sizeof(bpf_arg.out)) {
 			fi = get_fuse_inode(inode);
+
+			// nodeid 变化了， 则需要重新将 daemon中数据淘汰
 			if (outarg.nodeid != get_node_id(inode) ||
 #ifdef CONFIG_FUSE_BPF
 			    (ret == sizeof(bpf_arg.out) &&
@@ -304,11 +318,11 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 #endif
 			    (bool) IS_AUTOMOUNT(inode) != (bool) (outarg.attr.flags & FUSE_ATTR_SUBMOUNT)) {
 				fuse_queue_forget(fm->fc, forget,
-						  outarg.nodeid, 1);
+						  outarg.nodeid, 1);  // 使daemon中 node_id失效
 				goto invalid;
 			}
 			spin_lock(&fi->lock);
-			fi->nlookup++;
+			fi->nlookup++;     // inc nlookup
 			spin_unlock(&fi->lock);
 		}
 		kfree(forget);
@@ -321,8 +335,8 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		forget_all_cached_acls(inode);
 		fuse_change_attributes(inode, &outarg.attr,
 				       entry_attr_timeout(&outarg),
-				       attr_version);
-		fuse_change_entry_timeout(entry, &outarg);
+				       attr_version);      // 修改 inode attr
+		fuse_change_entry_timeout(entry, &outarg); // 修改 entry timeout 时间戳
 	} else if (inode) {
 		fi = get_fuse_inode(inode);
 		if (flags & LOOKUP_RCU) {
@@ -369,6 +383,7 @@ static void fuse_dentry_release(struct dentry *dentry)
 
 static int fuse_dentry_delete(const struct dentry *dentry)
 {
+  // 返回  fuse  dentry 是否过期， 超过 设置的时间
 	return time_before64(fuse_dentry_time(dentry), get_jiffies_64());
 }
 
@@ -507,8 +522,8 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 
 	attr_version = fuse_get_attr_version(fm->fc);
 
-	fuse_lookup_init(fm->fc, &args, nodeid, name, outarg, &bpf_arg.out);
-	err = fuse_simple_request(fm, &args);
+	fuse_lookup_init(fm->fc, &args, nodeid, name, outarg, &bpf_arg.out);  // 初始化lookup请求
+	err = fuse_simple_request(fm, &args);  // 发送lookup请求
 
 #ifdef CONFIG_FUSE_BPF
 	if (err == sizeof(bpf_arg.out)) {
@@ -566,7 +581,7 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 
 	err = -ENOMEM;
 	if (!*inode && outarg->nodeid) {
-		fuse_queue_forget(fm->fc, forget, outarg->nodeid, 1);
+		fuse_queue_forget(fm->fc, forget, outarg->nodeid, 1); // 失败情况
 		goto out;
 	}
 	err = 0;
@@ -625,7 +640,7 @@ static struct dentry *fuse_lookup(struct inode *dir, struct dentry *entry,
 
 	entry = newent ? newent : entry;
 	if (outarg_valid)
-		fuse_change_entry_timeout(entry, &outarg);
+		fuse_change_entry_timeout(entry, &outarg);  // 更新dentry 超时时间
 	else
 		fuse_invalidate_entry_cache(entry);
 
@@ -728,13 +743,13 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 	ff->fh = outopen.fh; // 创建返回fd
 	ff->nodeid = outentry.nodeid;
 	ff->open_flags = outopen.open_flags;
-	fuse_passthrough_setup(fc, ff, &outopen);
+	fuse_passthrough_setup(fc, ff, &outopen); // 通过open返回的passthrough_fh 建立 fuse_passthrough结构
 	inode = fuse_iget(dir->i_sb, outentry.nodeid, outentry.generation,
 			  &outentry.attr, entry_attr_timeout(&outentry), 0);
 	if (!inode) {
 		flags &= ~(O_CREAT | O_EXCL | O_TRUNC);
 		fuse_sync_release(NULL, ff, flags);
-		fuse_queue_forget(fm->fc, forget, outentry.nodeid, 1);
+		fuse_queue_forget(fm->fc, forget, outentry.nodeid, 1);  // 失败情况
 		err = -ENOMEM;
 		goto out_err;
 	}
@@ -751,7 +766,7 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 		fuse_finish_open(inode, file);
 		if (fm->fc->atomic_o_trunc && trunc)
 			truncate_pagecache(inode, 0);
-		else if (!(ff->open_flags & FOPEN_KEEP_CACHE))
+		else if (!(ff->open_flags & FOPEN_KEEP_CACHE)) // 如果没有FOPEN_KEEP_CACHE 则会 是 inode page 失效
 			invalidate_inode_pages2(inode->i_mapping);
 	}
 	return err;
@@ -851,7 +866,7 @@ static int create_new_entry(struct fuse_mount *fm, struct fuse_args *args,
 	inode = fuse_iget(dir->i_sb, outarg.nodeid, outarg.generation,
 			  &outarg.attr, entry_attr_timeout(&outarg), 0);
 	if (!inode) {
-		fuse_queue_forget(fm->fc, forget, outarg.nodeid, 1);
+		fuse_queue_forget(fm->fc, forget, outarg.nodeid, 1); // 失败情况
 		return -ENOMEM;
 	}
 	kfree(forget);
@@ -1556,7 +1571,7 @@ static int fuse_permission(struct user_namespace *mnt_userns,
 		u32 perm_mask = STATX_MODE | STATX_UID | STATX_GID;
 
 		if (perm_mask & READ_ONCE(fi->inval_mask) ||
-		    time_before64(fi->i_time, get_jiffies_64())) {
+		    time_before64(fi->i_time, get_jiffies_64())) {  // 如果时间小于该值，则要刷新
 			refreshed = true;
 
 			err = fuse_perm_getattr(inode, mask);

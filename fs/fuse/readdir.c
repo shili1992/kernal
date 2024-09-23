@@ -13,6 +13,7 @@
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 
+// 判断是否开启 !fc->do_readdirplus
 static bool fuse_use_readdirplus(struct inode *dir, struct dir_context *ctx)
 {
 	struct fuse_conn *fc = get_fuse_conn(dir);
@@ -194,8 +195,8 @@ static int fuse_direntplus_link(struct file *file,
 	fc = get_fuse_conn(dir);
 
 	name.hash = full_name_hash(parent, name.name, name.len);
-	dentry = d_lookup(parent, &name);
-	if (!dentry) {
+	dentry = d_lookup(parent, &name);  // 从dcache 中查找
+	if (!dentry) { // 没有找到
 retry:
 		dentry = d_alloc_parallel(parent, &name, &wq);
 		if (IS_ERR(dentry))
@@ -227,7 +228,7 @@ retry:
 		forget_all_cached_acls(inode);
 		fuse_change_attributes(inode, &o->attr,
 				       entry_attr_timeout(o),
-				       attr_version);
+				       attr_version);   // 修改entry 属性信息
 		/*
 		 * The other branch comes via fuse_iget()
 		 * which bumps nlookup inside
@@ -250,7 +251,7 @@ retry:
 	}
 	if (fc->readdirplus_auto)
 		set_bit(FUSE_I_INIT_RDPLUS, &get_fuse_inode(inode)->state);
-	fuse_change_entry_timeout(dentry, o);
+	fuse_change_entry_timeout(dentry, o); // 修改文件 entry timeout
 
 	dput(dentry);
 	return 0;
@@ -338,6 +339,7 @@ static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 	if (!page)
 		return -ENOMEM;
 
+    //  判断是否开启 readdirplus
 	plus = fuse_use_readdirplus(inode, ctx);
 	ap->args.out_pages = true;
 	ap->num_pages = 1;
@@ -346,7 +348,7 @@ static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 	if (plus) {
 		attr_version = fuse_get_attr_version(fm->fc);
 		fuse_read_args_fill(&ia, file, ctx->pos, PAGE_SIZE,
-				    FUSE_READDIRPLUS);
+				    FUSE_READDIRPLUS);  // plus使用 FUSE_READDIRPLUS op code
 	} else {
 		fuse_read_args_fill(&ia, file, ctx->pos, PAGE_SIZE,
 				    FUSE_READDIR);

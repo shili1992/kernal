@@ -93,26 +93,27 @@ struct dentry {
 	/* RCU lookup touched fields */
 	unsigned int d_flags;		/* protected by d_lock */
 	seqcount_spinlock_t d_seq;	/* per dentry seqlock */
-	struct hlist_bl_node d_hash;	/* lookup hash list */
-	struct dentry *d_parent;	/* parent directory */
-	struct qstr d_name;
-	struct inode *d_inode;		/* Where the name belongs to - NULL is
+	struct hlist_bl_node d_hash;	/* lookup hash list */  /* 链接到dentry cache的hash链表 */
+	struct dentry *d_parent;	/* parent directory */  /* 指向父dentry结构的指针 */
+	struct qstr d_name;  // 指定了文件的名称
+	struct inode *d_inode;		/* Where the name belongs to - NULL is  指向相关inode实例的指针
 					 * negative */
-	unsigned char d_iname[DNAME_INLINE_LEN];	/* small names */
+	unsigned char d_iname[DNAME_INLINE_LEN];	/* small names 如果文件名只是有少量的字符组成，则保存在d_iname中，以方便加速访问，短文件名一般不操作16个字符 */
 
 	/* Ref lookup also touches following */
+  //目录项对象引用计数器，当有process占用该文件的时候则d_lockref值加1.在某个进程删除文件的时候会判断该值的大小
 	struct lockref d_lockref;	/* per-dentry lock and refcount */
-	const struct dentry_operations *d_op;
-	struct super_block *d_sb;	/* The root of the dentry tree */
+	const struct dentry_operations *d_op; // dentry操作集
+	struct super_block *d_sb;	/* The root of the dentry tree */  // 当前文件系统的super blob指针
 	unsigned long d_time;		/* used by d_revalidate */
-	void *d_fsdata;			/* fs-specific data */
+	void *d_fsdata;			/* fs-specific data */  //具体文件系统的私有数据,  fuse entry 可以放到这里
 
 	union {
 		struct list_head d_lru;		/* LRU list */
 		wait_queue_head_t *d_wait;	/* in-lookup ones only */
 	};
-	struct list_head d_child;	/* child of parent list */
-	struct list_head d_subdirs;	/* our children */
+	struct list_head d_child;	/* child of parent list */  // 兄弟节点 entry
+	struct list_head d_subdirs;	/* our children */   /*子目录 子entrry, 是子项的链表头，子项可能是目录也可能是文件，所有子项都要链接到这个链表， */
 	/*
 	 * d_alias and d_rcu can share memory
 	 */
@@ -139,15 +140,27 @@ enum dentry_d_lock_class
 };
 
 struct dentry_operations {
+//  当VFS需要revalidate一个dentry（使dentry重新生效）时被调用。每当lookup流程在dcache中找到dentry时，
+//  就会调用这个接口。大多数文件系统将其保留为NULL，因为它们在dcache中的所有dentry都是有效的。
 	int (*d_revalidate)(struct dentry *, unsigned int);
 	int (*d_weak_revalidate)(struct dentry *, unsigned int);
+//  当VFS向dentry hash table中添加一个dentry时调用。
 	int (*d_hash)(const struct dentry *, struct qstr *);
+/*两个dentry互相比较时调用。
+  d_compare比较的是name。在d_lookup时，如果在dentry hash表中找到对应的dentry，则通过d_compare来比较dentry.qstr.name和传入的qstr.name，
+ 比如某些文件系统不区分大小写，则可以在d_compare中制定特殊的比较规则，
+ 否则默认的compare是case sensitive的memcmp。如果返回0，说明compare一致。
+*/
 	int (*d_compare)(const struct dentry *,
 			unsigned int, const char *, const struct qstr *);
+    // 删除dentry的最后一个引用时（dput中）调用。这意味着没有人在使用dentry，
+    // 但dentry仍然是有效的，并且在dcache中, 如果d_delete返回1，表明dentry为unhashed。。
 	int (*d_delete)(const struct dentry *);
 	int (*d_init)(struct dentry *);
+    // 当dentry真正被释放时调用。
 	void (*d_release)(struct dentry *);
 	void (*d_prune)(struct dentry *);
+    // 释放dentry关联的inode时被调用。当这个字段为NULL时，VFS会调用iput()。如果某个文件系统定义了d_iput，则文件系统必须自己调用iput()。
 	void (*d_iput)(struct dentry *, struct inode *);
 	char *(*d_dname)(struct dentry *, char *, int);
 	struct vfsmount *(*d_automount)(struct path *);

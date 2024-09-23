@@ -848,10 +848,11 @@ out_dput:
 	return false;
 }
 
+// 通过文件系统中定义的d_revalidate()函数来判断该dentry是否有效以保证一致性
 static inline int d_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	if (unlikely(dentry->d_flags & DCACHE_OP_REVALIDATE))
-		return dentry->d_op->d_revalidate(dentry, flags);
+		return dentry->d_op->d_revalidate(dentry, flags);  //判断dentry 是否保持一致， 如果不一致则lookup文件系统获取
 	else
 		return 1;
 }
@@ -1519,8 +1520,9 @@ static struct dentry *lookup_dcache(const struct qstr *name,
 				    struct dentry *dir,
 				    unsigned int flags)
 {
-	struct dentry *dentry = d_lookup(dir, name);
+	struct dentry *dentry = d_lookup(dir, name);  // dentry hash表的查找
 	if (dentry) {
+      // 如果找到则进行 验证一致性， 如果过期则需要到具体文件系统中进行lookup
 		int error = d_revalidate(dentry, flags);
 		if (unlikely(error <= 0)) {
 			if (!error)
@@ -1548,23 +1550,26 @@ static struct dentry *__lookup_hash(const struct qstr *name,
 
 	if (dentry)
 		return dentry;
-
+    // 如果没有找到
 	/* Don't create child dentry for a dead directory. */
 	if (unlikely(IS_DEADDIR(dir)))
 		return ERR_PTR(-ENOENT);
 
+  /*如果父目录文件系统定义了比较文件名的方法，则调用之*/
 	dentry = d_alloc(base, name);
 	if (unlikely(!dentry))
 		return ERR_PTR(-ENOMEM);
 
-	old = dir->i_op->lookup(dir, dentry, flags);
-	if (unlikely(old)) {
-		dput(dentry);
-		dentry = old;
-	}
-	return dentry;
+  /*调用特定于文件系统的lookup函数从磁盘中读取数据并将dentry添入散列表*/
+    old = dir->i_op->lookup(dir, dentry, flags);
+    if (unlikely(old)) {
+        dput(dentry);
+        dentry = old;
+    }
+    return dentry;
 }
 
+//通过lookup_fast使用RCU方式快速搜索文件，
 static struct dentry *lookup_fast(struct nameidata *nd,
 				  struct inode **inode,
 			          unsigned *seqp)
@@ -1577,8 +1582,10 @@ static struct dentry *lookup_fast(struct nameidata *nd,
 	 * of a false negative due to a concurrent rename, the caller is
 	 * going to fall back to non-racy lookup.
 	 */
+  //文件可能存在RCU锁，这表示可能有别的进程使用，则有可能被加载到 dcache 中
 	if (nd->flags & LOOKUP_RCU) {
 		unsigned seq;
+      //RCU方式搜索，只使用内存屏障作为防护手段
 		dentry = __d_lookup_rcu(parent, &nd->last, &seq);
 		if (unlikely(!dentry)) {
 			if (!try_to_unlazy(nd))
@@ -1590,7 +1597,9 @@ static struct dentry *lookup_fast(struct nameidata *nd,
 		 * This sequence count validates that the inode matches
 		 * the dentry name information from lookup.
 		 */
+      //此序列计数验证inode是否与查找中的dentry名称信息相匹配
 		*inode = d_backing_inode(dentry);
+      //在子目录的read_seqcount_begin的内存屏障就足够，这里判断父目录和子目录的seq是否一致
 		if (unlikely(read_seqcount_retry(&dentry->d_seq, seq)))
 			return ERR_PTR(-ECHILD);
 
@@ -1605,6 +1614,7 @@ static struct dentry *lookup_fast(struct nameidata *nd,
 			return ERR_PTR(-ECHILD);
 
 		*seqp = seq;
+      //找到的目录是否需要重新生效，需要就执行denter的对应函数
 		status = d_revalidate(dentry, nd->flags);
 		if (likely(status > 0))
 			return dentry;
@@ -1613,10 +1623,12 @@ static struct dentry *lookup_fast(struct nameidata *nd,
 		if (status == -ECHILD)
 			/* we'd been told to redo it in non-rcu mode */
 			status = d_revalidate(dentry, nd->flags);
-	} else {
+	} else {//普通查找
+      //普通查找抵用函数__d_lookup
 		dentry = __d_lookup(parent, &nd->last);
 		if (unlikely(!dentry))
 			return NULL;
+      //找到的目录是否需要重新生效，需要就执行denter的对应函数
 		status = d_revalidate(dentry, nd->flags);
 	}
 	if (unlikely(status <= 0)) {
@@ -1641,10 +1653,11 @@ static struct dentry *__lookup_slow(const struct qstr *name,
 	if (unlikely(IS_DEADDIR(inode)))
 		return ERR_PTR(-ENOENT);
 again:
+  //分配内存
 	dentry = d_alloc_parallel(dir, name, &wq);
 	if (IS_ERR(dentry))
 		return dentry;
-	if (unlikely(!d_in_lookup(dentry))) {
+	if (unlikely(!d_in_lookup(dentry))) {//普通查找cache方式成功
 		int error = d_revalidate(dentry, flags);
 		if (unlikely(error <= 0)) {
 			if (!error) {
@@ -1656,6 +1669,7 @@ again:
 			dentry = ERR_PTR(error);
 		}
 	} else {
+      //普通查找失败，需要进入文件系统查找
 		old = inode->i_op->lookup(inode, dentry, flags);
 		d_lookup_done(dentry);
 		if (unlikely(old)) {
@@ -1672,9 +1686,9 @@ static struct dentry *lookup_slow(const struct qstr *name,
 {
 	struct inode *inode = dir->d_inode;
 	struct dentry *res;
-	inode_lock_shared(inode);
+	inode_lock_shared(inode);;    //上锁
 	res = __lookup_slow(name, dir, flags);
-	inode_unlock_shared(inode);
+	inode_unlock_shared(inode);  //解锁
 	return res;
 }
 
@@ -1965,10 +1979,10 @@ static const char *walk_component(struct nameidata *nd, int flags)
 			put_link(nd);
 		return handle_dots(nd, nd->last_type);
 	}
-	dentry = lookup_fast(nd, &inode, &seq);
+	dentry = lookup_fast(nd, &inode, &seq);  // 过lookup_fast使用RCU方式快速搜索文件
 	if (IS_ERR(dentry))
 		return ERR_CAST(dentry);
-	if (unlikely(!dentry)) {
+	if (unlikely(!dentry)) {  // 失败则使用lookup_slow进行慢速的搜索
 		dentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);
 		if (IS_ERR(dentry))
 			return ERR_CAST(dentry);

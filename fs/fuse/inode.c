@@ -121,6 +121,7 @@ static void fuse_free_inode(struct inode *inode)
 	kmem_cache_free(fuse_inode_cachep, fi);
 }
 
+// 移除该 inode 的时候
 static void fuse_evict_inode(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
@@ -200,6 +201,7 @@ static void fuse_fill_attr_from_inode(struct fuse_attr *attr,
 	};
 }
 
+// 修改inode
 void fuse_change_attributes_common(struct inode *inode, struct fuse_attr *attr,
 				   u64 attr_valid)
 {
@@ -209,7 +211,7 @@ void fuse_change_attributes_common(struct inode *inode, struct fuse_attr *attr,
 	lockdep_assert_held(&fi->lock);
 
 	fi->attr_version = atomic64_inc_return(&fc->attr_version);
-	fi->i_time = attr_valid;
+	fi->i_time = attr_valid;  // 设置 i_time
 	WRITE_ONCE(fi->inval_mask, 0);
 
 	inode->i_ino     = fuse_squash_ino(attr->ino);
@@ -261,6 +263,7 @@ void fuse_change_attributes_common(struct inode *inode, struct fuse_attr *attr,
 	inode->i_flags &= ~S_NOSEC;
 }
 
+// 修改 inode的属性信息
 void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr,
 			    u64 attr_valid, u64 attr_version)
 {
@@ -271,6 +274,10 @@ void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr,
 	struct timespec64 old_mtime;
 
 	spin_lock(&fi->lock);
+    // fi->attr_version是当前的version。而attr_version是在调用调用底层readdir之前的version。
+    // 这句话的意思也就是说如果在调用readdir还没有返回时，attr发生了变化，那么就不更新属性了，因为如果write了，那么这个attr显然就失效了
+    // readdir会把属性缓存在内核缓存，所以readdir后去调用stat不会去底层获取信息。
+    // 但是如果readdir操作时候(还没有返回)，对这个inode有wrirte操作(不管readdir和write返回的先后顺序怎么样)，那么readdir并不会缓存属性
 	if ((attr_version != 0 && fi->attr_version > attr_version) ||
 	    test_bit(FUSE_I_SIZE_UNSTABLE, &fi->state)) {
 		spin_unlock(&fi->lock);
@@ -456,7 +463,7 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 		if (!inode)
 			return NULL;
 
-		fuse_init_inode(inode, attr);
+		fuse_init_inode(inode, attr);  // 修改inode
 		get_fuse_inode(inode)->nodeid = nodeid;
 		inode->i_flags |= S_AUTOMOUNT;
 		goto done;

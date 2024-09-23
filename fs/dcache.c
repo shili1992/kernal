@@ -635,6 +635,8 @@ static inline struct dentry *lock_parent(struct dentry *dentry)
 	return __lock_parent(dentry);
 }
 
+//调用retain_dentry如果执行成功，说明继续保留dentry，后续复用
+// 可以在必要时主动增加d_count,确保该dentry在使用期间不会被回收。
 static inline bool retain_dentry(struct dentry *dentry)
 {
 	WARN_ON(d_in_lookup(dentry));
@@ -647,7 +649,7 @@ static inline bool retain_dentry(struct dentry *dentry)
 		return false;
 
 	if (unlikely(dentry->d_flags & DCACHE_OP_DELETE)) {
-		if (dentry->d_op->d_delete(dentry))
+		if (dentry->d_op->d_delete(dentry)) // 判断是否保留， fuse中通过entry_timeout 进行判断
 			return false;
 	}
 
@@ -2222,6 +2224,7 @@ struct dentry *d_add_ci(struct dentry *dentry, struct inode *inode,
 EXPORT_SYMBOL_NS(d_add_ci, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 
+// 判断文件名是否匹配
 static inline bool d_same_name(const struct dentry *dentry,
 				const struct dentry *parent,
 				const struct qstr *name)
@@ -2231,6 +2234,7 @@ static inline bool d_same_name(const struct dentry *dentry,
 			return false;
 		return dentry_cmp(dentry, name->name, name->len) == 0;
 	}
+  /*如果父目录文件系统定义了比较文件名的方法，则调用之*/
 	return parent->d_op->d_compare(dentry,
 				       dentry->d_name.len, dentry->d_name.name,
 				       name) == 0;
@@ -2390,10 +2394,11 @@ EXPORT_SYMBOL(d_lookup);
  *
  * __d_lookup callers must be commented.
  */
+ // 在dentry缓存中查找的过程
 struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 {
 	unsigned int hash = name->hash;
-	struct hlist_bl_head *b = d_hash(hash);
+	struct hlist_bl_head *b = d_hash(hash);  // //通过parent的地址和hash(hash是name的哈希值)进行定位
 	struct hlist_bl_node *node;
 	struct dentry *found = NULL;
 	struct dentry *dentry;
@@ -2420,22 +2425,23 @@ struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 	 */
 	rcu_read_lock();
 	
-	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
+	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {  // /扫描head对应的碰撞溢出表
 
-		if (dentry->d_name.hash != hash)
+		if (dentry->d_name.hash != hash)  //name的hash值不相符，则放弃该dentry
 			continue;
 
 		spin_lock(&dentry->d_lock);
-		if (dentry->d_parent != parent)
+		if (dentry->d_parent != parent) //父目录不一样，则放弃该dentry
 			goto next;
 		if (d_unhashed(dentry))
 			goto next;
 
+      /*当确保了父目录和文件名的哈希值与目标dentry的一致性后，接下来就只用匹配文件名了*/
 		if (!d_same_name(dentry, parent, name))
 			goto next;
 
 		dentry->d_lockref.count++;
-		found = dentry;
+		found = dentry;  //这里表明找到了目标dentry
 		spin_unlock(&dentry->d_lock);
 		break;
 next:

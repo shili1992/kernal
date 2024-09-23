@@ -291,7 +291,7 @@ int fuse_open_common(struct inode *inode, struct file *file, bool isdir)
 
 		if (fc->atomic_o_trunc && (file->f_flags & O_TRUNC))
 			truncate_pagecache(inode, 0);
-		else if (!(ff->open_flags & FOPEN_KEEP_CACHE))
+		else if (!(ff->open_flags & FOPEN_KEEP_CACHE)) //如果没有FOPEN_KEEP_CACHE 则会 是 inode page 失效
 			invalidate_inode_pages2(inode->i_mapping);
 	}
 	if (dax_truncate)
@@ -1152,6 +1152,7 @@ bool fuse_write_update_size(struct inode *inode, loff_t pos)
 	bool ret = false;
 
 	spin_lock(&fi->lock);
+  // 还有很多其他地方也会调用这个，比如link，unlink， 增加attr_version版本
 	fi->attr_version = atomic64_inc_return(&fc->attr_version);
 	if (pos > inode->i_size) {
 		i_size_write(inode, pos);
@@ -1345,11 +1346,12 @@ static ssize_t fuse_perform_write(struct kiocb *iocb,
 		kfree(ap->pages);
 	} while (!err && iov_iter_count(ii));
 
+  // 当res大于0时才会调用； 所以有没有可能这里小于等于0
 	if (res > 0)
 		fuse_write_update_size(inode, pos);
 
 	clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-	fuse_invalidate_attr(inode);
+	fuse_invalidate_attr(inode);   // 使attr 失效， write完会使得文件的属性失效
 
 	return res > 0 ? res : err;
 }

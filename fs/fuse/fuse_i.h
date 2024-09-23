@@ -128,7 +128,7 @@ struct fuse_inode {
 
 	/** Unique ID, which identifies the inode between userspace
 	 * and kernel */
-	u64 nodeid;
+	u64 nodeid;   // Unique ID，用户空间和内核之间的唯一标识符， node和 inode桥梁
 
 	/** Number of lookups on this inode */
 	u64 nlookup;
@@ -150,7 +150,7 @@ struct fuse_inode {
 	u64 orig_ino;
 
 	/** Version of last attribute change */
-	u64 attr_version;
+	u64 attr_version;   // 当前属性的version, 更新后会增加
 
 	union {
 		/* Write related fields (regular file only) */
@@ -257,7 +257,7 @@ struct fuse_file {
 	u64 fh;  // daemon 空间返回的 fd, 保存在这里
 
 	/** Node id of this file */
-	u64 nodeid;
+	u64 nodeid;  // fuse demand 中的 node id
 
 	/** Refcount */
 	refcount_t count;

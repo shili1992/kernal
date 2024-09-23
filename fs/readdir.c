@@ -64,7 +64,7 @@ int iterate_dir(struct file *file, struct dir_context *ctx)
 		if (shared)
 			res = file->f_op->iterate_shared(file, ctx);
 		else
-			res = file->f_op->iterate(file, ctx);
+			res = file->f_op->iterate(file, ctx);   // 调用各种文件系统的read dir
 		file->f_pos = ctx->pos;
 		fsnotify_access(file);
 		file_accessed(file);
